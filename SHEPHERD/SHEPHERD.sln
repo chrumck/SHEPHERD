@@ -1,0 +1,31 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.37111.16
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SHEPHERD", "SHEPHERD.csproj", "{B2D7F1A4-6C3E-4A19-9E5B-1F0A2C3D4E5F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SHEPHERD.Tests", "..\SHEPHERD.Tests\SHEPHERD.Tests.csproj", "{C3E8A2B5-7D4F-4B20-8F6C-2A1B3C4D5E60}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B2D7F1A4-6C3E-4A19-9E5B-1F0A2C3D4E5F}.Debug|x64.ActiveCfg = Debug|x64
+		{B2D7F1A4-6C3E-4A19-9E5B-1F0A2C3D4E5F}.Debug|x64.Build.0 = Debug|x64
+		{B2D7F1A4-6C3E-4A19-9E5B-1F0A2C3D4E5F}.Release|x64.ActiveCfg = Release|x64
+		{B2D7F1A4-6C3E-4A19-9E5B-1F0A2C3D4E5F}.Release|x64.Build.0 = Release|x64
+		{C3E8A2B5-7D4F-4B20-8F6C-2A1B3C4D5E60}.Debug|x64.ActiveCfg = Debug|x64
+		{C3E8A2B5-7D4F-4B20-8F6C-2A1B3C4D5E60}.Debug|x64.Build.0 = Debug|x64
+		{C3E8A2B5-7D4F-4B20-8F6C-2A1B3C4D5E60}.Release|x64.ActiveCfg = Release|x64
+		{C3E8A2B5-7D4F-4B20-8F6C-2A1B3C4D5E60}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D4F9B3C6-8E50-4C31-9A7D-3B2C4D5E6F71}
+	EndGlobalSection
+EndGlobal

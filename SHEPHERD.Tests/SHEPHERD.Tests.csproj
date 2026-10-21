@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Sibling test project for SHEPHERD. Deliberately
+    separate from the PB project:
+      * References ONLY Mal.Mdk2.References (the real SE/VRage assemblies from Bin64) — NOT the PbAnalyzers
+        (which would restrict tests to PB-whitelisted APIs) nor the PbPackager (minifier).
+      * LINKS the PB project's source (..\SHEPHERD\*.cs, non-recursive so obj/ and bin/ generated sources are
+        excluded) rather than copying it, so internal types are reachable and tests pin the real source. New
+        PB files are picked up by the glob without editing this file.
+      * SHEPHERD_TESTS forces the in-file PROFILE_DIAG define off so tests
+        characterize the shipped logic, not the instrumented build.
+      * SpaceEngineersBinCopyLocal=true copies the SE assemblies next to the test host so the runtime can load
+        value/utility types (MyItemType, MyFixedPoint, MyIni, MyDefinitionId, ...).
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <IsPackable>false</IsPackable>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <DefineConstants>$(DefineConstants);SHEPHERD_TESTS</DefineConstants>
+    <SpaceEngineersBinCopyLocal>true</SpaceEngineersBinCopyLocal>
+    <!-- The linked PB source is C#6; don't let SDK analyzers fail us on unused-field noise. -->
+    <NoWarn>$(NoWarn);CS0414;CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\SHEPHERD\*.cs" Link="%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mal.Mdk2.References" Version="2.2.9">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>build; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Moq" Version="4.20.72" />
+  </ItemGroup>
+
+</Project>
