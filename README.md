@@ -129,7 +129,7 @@ Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[S
    estimated sim speed, block counts and a per-tick-kind table — where you check server-legality.
    1. `U1 4% · U10 95% · U100 1%` — time spent at each speed. `U1` (every tick) while items queue up, after
       Check Code, during a bottle sweep and in learn mode; `U10` when caught up or slowed after a long run or
-      a sim dip; `U100` when holding back for the server, standing by or `HALTED`.
+      a sim dip; `U100` when holding back for the server, for a few seconds after a run over `spikeMs`, standing by or `HALTED`.
    2. `THROTTLED · U10` in the header has two causes, counted apart: `thr xN P%` (a run over the per-run
       limit) and `wary xN P%` (the server's sim speed dipped).
    3. `over N` on each row counts every run over `peakMs`, including ones a garbage collection landed on
@@ -182,6 +182,9 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `parkSim` | `0.75` | 0–0.99 | Park while sim speed keeps dropping below this. `0` = never park. |
 | `resumeSim` | `0.8` | up to 1 | Resume once average sim speed is back above this. Must be ≥ `parkSim`, or both revert. |
 | `backoffSim` | `0.9` | 0–1 | The `peakMs` back-off applies only below this sim speed. `1` = always, `0` = never. |
+| `spikeMs` | `5` | 0.001–1000 | A run longer than this pauses SHEPHERD's heavy work and screens for `spikeHoldSeconds`, at any sim speed. |
+| `spikeHoldSeconds` | `6` | ≥ 0 | How long that pause lasts, in game seconds. `0` = no pause. |
+| `spikeGraceSeconds` | `60` | ≥ 0 | No such pause this long after the script starts, so the slow first cycle after a compile runs straight through. |
 
 **Machines.** A machine below its target pulls fuel or ore ahead of storage, refilled once it has burnt a
 quarter of the target; a refinery on a shortage you set up is filled at once. Output is collected every
@@ -194,7 +197,10 @@ long interval.
 
 **Server limits.** The defaults match Destiny's Advanced PB Limiter (0.8 ms per run, enforced below sim
 0.7). **Raising `peakMs` or lowering `parkSim`/`backoffSim` lets SHEPHERD run into the limiter's
-punishment** — change them only for a server with different limits or a test world.
+punishment** — change them only for a server with different limits or a test world. Destiny also punishes
+three runs over 10 ms within 10 s at any sim speed; a 6 s pause after every run over 5 ms keeps any 10 s to at most
+two such runs, so raise `spikeMs` or shorten `spikeHoldSeconds` with the same care. The first runs after a compile
+are the slow ones, and that rule has never punished them, so `spikeGraceSeconds` skips the pause right after a start.
 
 **Mistakes are reported, never guessed.** An unknown key logs `unknown setting '<key>'`; a bad or
 out-of-range value logs `bad setting '<key>=<value>'` and keeps the default. `configReload` shows what was
@@ -204,6 +210,7 @@ read in the programmable block's detail pane (a toggle missing from the `priorit
 reloaded 2 pools, 14 quotas, 3 overrides, 0 facts
 priority 0, dockedProduction
 peakMs 0.8, parkSim 0.75, resumeSim 0.8, backoffSim 0.9
+spikeMs 5, spikeHoldSeconds 6, spikeGraceSeconds 60
 fill % 15/50/30, bottles 3 min, pass 60 s, UTC+1
 ```
 
@@ -438,7 +445,7 @@ Docking and undocking are picked up within seconds (`docking changed - rescannin
 
 Among one owner's SHEPHERD blocks on a ship or docked group, one leads and the rest **stand by** (move
 nothing; commands other than `learn` still work). A docked ship hands over to the base and takes over again ~10 s after
-undocking. Another player's SHEPHERD, or one beyond a `[SHEPHERD-Split]`, runs on its own.
+undocking. A block started while docked runs one scan before it stands by. Another player's SHEPHERD, or one beyond a `[SHEPHERD-Split]`, runs on its own.
 
 Who leads: highest `priority`, then station over ship, then large grid over small, then a fixed pick. A
 standing-by block takes over 10–15 s after the leader goes away. The log records each change (`standing by

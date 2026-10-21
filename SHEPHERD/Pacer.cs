@@ -7,8 +7,8 @@ namespace IngameScript
     // leave the average far below its bar, while a rare-wake idle made reacting to new work (a
     // ship docking mid-idle-cycle) take minutes, since a whole cycle must step through before the first move is
     // even found. Recovering = a breach was just seen, so wake less often and fire no heavy call until the
-    // window passes. Parked = a safety hold (sim park, stand-down, open breaker, escalated back-off) — wake
-    // rarely; minimal presence is the point.
+    // window passes. Parked = a safety hold (sim park, stand-down, open breaker, escalated back-off, spike
+    // hold) — wake rarely; minimal presence is the point.
     public enum Cadence { Parked, Idle, Working, Recovering }
 
     // The one adaptive controller. A PB cannot read its own in-run time, so every decision is driven by the
@@ -37,6 +37,9 @@ namespace IngameScript
     //     bar of 1 arms it at any sim, for a limiter that enforces regardless of sim speed. Reducing exposure is
     //     the only lever, since we can't stop the first breach (a tick late) or see GC to match the limiter's
     //     GC-drop from the sandbox;
+    //   * a spike hold — past a startup grace, a run far over the peak bar holds heavies and parks at ANY sim, so cold
+    //     paths (a resume after stand-by runs methods the startup never called, and the first run compiles them)
+    //     can't land close together where a server punishes a few long runs regardless of sim speed;
     //   * dynamic cadence — fast only while a backlog drains, moderate otherwise, rare only under a safety park.
     public sealed class Pacer
     {
@@ -56,6 +59,10 @@ namespace IngameScript
         double parkSim = DefaultParkSim;     // sim samples below this trigger the park stages; 0 = no sim park
         double resumeSim = DefaultResumeSim; // a full park resumes only once the sim AVERAGE clears this — sustained recovery, not one good sample
         double backoffSim = DefaultBackoffSim; // the breach back-off arms only while the sim is below this; 1 = at any sim
+        double spikeMs = DefaultSpikeMs;       // a run over this starts the spike hold
+        double spikeHoldSec = DefaultSpikeHoldSec; // its length; 0 = no hold
+        double spikeGraceSec = DefaultSpikeGraceSec; // no spike hold this long after start
+        double sinceStart;      // sim-time since this PB started
         // A tick whose game/wall ratio is below this was not slow, it was ABSENT: the game was paused, alt-tabbed,
         // or saving, so game time froze while the wall clock ran on. Such an interval carries no sim-speed
         // information at all — and taken as a measurement it reads as a ~50x-or-worse slowdown, which would
@@ -76,6 +83,13 @@ namespace IngameScript
         const double SimWaryWindowSec = 5.0;
         public const int WaryDips = 2;       // dips within the window before heavies are held and the cadence slows
         public const int ParkDips = 3;       // dips within the window before the full park
+        // Destiny punishes 3 runs over 10 ms within 10 s at any sim speed. A hold longer than half that window lets
+        // at most two spikes into one, whatever caused them; the bar sits well above any steady-state run.
+        public const double DefaultSpikeMs = 5.0;
+        public const double DefaultSpikeHoldSec = 6.0;
+        // Cold starts have never been punished on Destiny, so its enforcer has a startup grace of its own; holding
+        // inside it only delays the slow first cycle.
+        public const double DefaultSpikeGraceSec = 60.0;
         const double StandDownSec = 30.0;    // cooperative hold after a GracefulShutDown:: signal — let the offense window age out
         const double CrashHoldSec = 2.0;     // hold after a crashing step so it can never fast-loop
         const int MaxConsecutiveCrashes = 5; // this many crashes with no clean run between → open the breaker (park at idle)
@@ -83,6 +97,7 @@ namespace IngameScript
         double holdSec;         // heavy-call refractory remaining (sim-time)
         double backoffSec;      // cadence back-off remaining (sim-time)
         double standDownSec;    // GracefulShutDown stand-down remaining (sim-time)
+        double spikeSec;        // spike hold remaining (sim-time)
         int windowBreaches;     // breaches recorded in the current back-off window; 1 → Recovering, 2+ → Parked (escalation)
         int consecutiveCrashes; // crashing steps since the last clean run; a run of them opens the breaker
         bool firedLastTick;     // a heavy fired last tick — its cost arrives as THIS tick's lastRunMs
@@ -110,6 +125,13 @@ namespace IngameScript
             backoffSim = backoffBelowSim;
         }
 
+        public void SetSpike(double overMs, double holdSeconds, double graceSeconds)
+        {
+            spikeMs = overMs;
+            spikeHoldSec = holdSeconds;
+            spikeGraceSec = graceSeconds;
+        }
+
         public bool SimParked => simParked;
 
         public bool SimWary => simDipCount >= WaryDips && !simParked;
@@ -117,6 +139,12 @@ namespace IngameScript
         public double SimInstant => simInstant;
 
         public double SimAvg => simGameAvg / simWallAvg;
+
+        // A spike hold is running: no heavy call and no panel render, which can be a cold path too.
+        public bool Cooling => spikeSec > 0.0;
+
+        // Runs over the spike bar since the startup grace ended; each one is worth a log line.
+        public int Spikes { get; private set; }
 
         // How many times a cadence back-off has ENGAGED since the last reset (each fresh engagement, not each
         // throttled tick). Surfaced as "thr xN" on [SHEPHERD-DEBUG]. It over-states real offenses (it can't see
@@ -139,11 +167,11 @@ namespace IngameScript
         // crashing step is retried at most once per rare wake, never hammered. Closes on a clean run.
         public bool Halted => consecutiveCrashes >= MaxConsecutiveCrashes;
 
-        // Deliberately slowing down beyond the routine per-heavy refractory — a spike back-off, a crash hold, a
-        // stand-down, or the sim park is active. Surfaced as THROTTLED on [SHEPHERD-DEBUG] only, not the glanceable status LCD
+        // Deliberately slowing down beyond the routine per-heavy refractory — a breach back-off, a spike hold, a crash
+        // hold, a stand-down, or the sim park is active. Surfaced as THROTTLED on [SHEPHERD-DEBUG] only, not the glanceable status LCD
         // (throttling is common/expected, so it would be noise there). The transient per-heavy holdSec is normal
         // working, so it is excluded; Halted is reported separately.
-        public bool Throttled => backoffSec > 0.0 || standDownSec > 0.0 || simParked || simDipCount >= WaryDips;
+        public bool Throttled => backoffSec > 0.0 || standDownSec > 0.0 || spikeSec > 0.0 || simParked || simDipCount >= WaryDips;
 
         // Top of every tick: age the timers by the elapsed sim-time and learn from the previous run's cost.
         // wallSeconds is the wall-clock time the same interval took; game ÷ wall over a sample window is the sim
@@ -156,6 +184,8 @@ namespace IngameScript
             holdSec = Age(holdSec, dtSeconds);
             backoffSec = Age(backoffSec, dtSeconds);
             standDownSec = Age(standDownSec, dtSeconds);
+            spikeSec = Age(spikeSec, dtSeconds);
+            sinceStart += dtSeconds;
             simWarySec = Age(simWarySec, dtSeconds);
             if (simWarySec <= 0.0) simDipCount = 0;
 
@@ -206,8 +236,14 @@ namespace IngameScript
             if (workPending && lastRunMs > breachMs
                 && (backoffSim >= 1.0 || simInstant < backoffSim || SimAvg < backoffSim)) ArmBackoff();
 
+            if (lastRunMs > spikeMs && sinceStart >= spikeGraceSec)
+            {
+                Spikes++;
+                spikeSec = spikeHoldSec;
+            }
+
             firedLastTick = false;
-            AllowHeavy = !simParked && simDipCount < WaryDips && holdSec <= 0.0 && backoffSec <= 0.0 && standDownSec <= 0.0;
+            AllowHeavy = !simParked && simDipCount < WaryDips && holdSec <= 0.0 && backoffSec <= 0.0 && standDownSec <= 0.0 && spikeSec <= 0.0;
         }
 
         // Arm (or escalate) the cadence back-off after a breach. A fresh engagement opens a new window (and
@@ -226,7 +262,7 @@ namespace IngameScript
         // escalated back-off parks even when a backlog is draining.
         public Cadence NextCadence(bool backlog)
         {
-            if (standDownSec > 0.0 || Halted || simParked) return Cadence.Parked;
+            if (standDownSec > 0.0 || spikeSec > 0.0 || Halted || simParked) return Cadence.Parked;
             if (backoffSec > 0.0) return windowBreaches >= 2 ? Cadence.Parked : Cadence.Recovering;
             if (simDipCount >= WaryDips) return Cadence.Recovering;
             return backlog ? Cadence.Working : Cadence.Idle;

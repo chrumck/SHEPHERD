@@ -31,7 +31,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.0";
+        const string ScriptVersion = "1.0.3";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -98,6 +98,9 @@ namespace IngameScript
         const string ParkSimKey = "parkSim";
         const string ResumeSimKey = "resumeSim";
         const string BackoffSimKey = "backoffSim";
+        const string SpikeMsKey = "spikeMs";
+        const string SpikeHoldKey = "spikeHoldSeconds";
+        const string SpikeGraceKey = "spikeGraceSeconds";
         const string UtcOffsetKey = "utcOffsetHours";
         const string ReactorFillKey = "reactorFillPct";
         const string GasGenFillKey = "gasGenFillPct";
@@ -161,7 +164,7 @@ namespace IngameScript
         bool dockedProduction;           // [Settings]: also manage docked refineries and assemblers
         bool dockedFuel;                 // [Settings]: also top up docked reactors and gas generators
         // [Settings]: the limiter bars the Pacer throttles against, kept here for the configReload readback.
-        double peakMs, parkSim, resumeSim, backoffSim;
+        double peakMs, parkSim, resumeSim, backoffSim, spikeMs, spikeHoldSeconds, spikeGraceSeconds;
         // [Settings]: hours added to UTC for the clock (display only); how full to keep each machine kind's input,
         // as a percent of its max volume (0 = don't feed that kind); minutes between bottle sweeps (0 = none).
         double utcOffsetHours, reactorFillPct, gasGenFillPct, refineryFillPct, bottleSweepMinutes;
@@ -172,6 +175,10 @@ namespace IngameScript
         readonly PeerElection election = new PeerElection();
         readonly IMyBroadcastListener leadListener;
         string leader;                   // the live peer this PB stands by for; null while it does the work
+        // A ledger walk has completed since compile. Until then an outranked PB keeps scanning instead of standing by:
+        // the first run of each path is slow (its methods compile), and paid inside the limiter's startup allowance
+        // it is free, while a stand-by would defer it to the resume — an undock, long after the allowance.
+        bool warmedUp;
         // The stand-by status panel's one message block ("<leader> leads"), refilled only on a lead change.
         readonly List<string> standbyLines = new List<string>();
         readonly List<List<string>> standbyMessages = new List<List<string>>();
@@ -198,8 +205,9 @@ namespace IngameScript
         readonly Dictionary<long, double> harvestedAt = new Dictionary<long, double>();
         readonly Dictionary<int, long> dueOutputs = new Dictionary<int, long>();
         RunKind lastTickKind;      // what last tick did → THIS tick's LastRunTimeMs is that kind's cost (one tick late)
-        int lastBackoffs;          // last-seen Pacer.Backoffs → a fresh spike back-off engaged
+        int lastBackoffs;          // last-seen Pacer.Backoffs → a fresh breach back-off engaged
         int lastEscalations;       // last-seen Pacer.Escalations → a back-off escalated to a park
+        int lastSpikes;            // last-seen Pacer.Spikes → a spike hold engaged
         double lastBackoffSec = -BackoffLogQuietSeconds;
         DateTime lastRunWallClock = DateTime.UtcNow; // wall-clock of the previous run → the sim-speed estimate's denominator
         double gameSeconds;                          // lifetime game-time clock for the yield sample's pace deltas
@@ -390,11 +398,11 @@ namespace IngameScript
                 Log("sim " + pacer.SimInstant.ToString("0.00") + "/" + pacer.SimAvg.ToString("0.00")
                     + (simParkLogged ? " - parking" : " - resuming"));
             }
-            // Standing by does no work at all, and renders only a panel the leader doesn't draw.
-            if (StandingBy())
+            // A warmed-up PB standing by does no work at all, and renders only a panel the leader doesn't draw.
+            if (StandingBy() && warmedUp)
             {
                 Echo(echoText);
-                if (!election.LeaderOnOurConstruct) RenderStandingBy();
+                if (!election.LeaderOnOurConstruct && !pacer.Cooling) RenderStandingBy();
                 ApplyCadence(Cadence.Parked);
                 return;
             }
@@ -403,7 +411,8 @@ namespace IngameScript
             // Render only on a plain cheap tick — a heavy tick must do nothing but its call to keep headroom for a
             // GC pause, and the plan and save ticks stay alone so their profiler rows measure only themselves. The
             // cheap ticks render plenty.
-            if (lastTickKind == RunKind.Other && !observed) RenderTick();
+            // A warming PB leaves the panels to a leader on its own construct.
+            if (lastTickKind == RunKind.Other && !observed && !pacer.Cooling && (leader == null || !election.LeaderOnOurConstruct)) RenderTick();
 
             ApplyCadence(pacer.NextCadence(backlog));
 
@@ -413,11 +422,12 @@ namespace IngameScript
             // routine ones would bury every other message. prevKind + lastRunMs name the run that armed it
             // (ArmBackoff runs only in Observe off lastRunMs).
             var engaged = pacer.Backoffs > lastBackoffs;
-            if (pacer.Escalations > lastEscalations || engaged && gameSeconds - lastBackoffSec >= BackoffLogQuietSeconds)
+            if (pacer.Escalations > lastEscalations || pacer.Spikes > lastSpikes || engaged && gameSeconds - lastBackoffSec >= BackoffLogQuietSeconds)
                 Log("throttling " + CadenceLabel() + " (" + Profiler.Tag(prevKind) + " " + lastRunMs.ToString("0.000") + "ms)");
             if (engaged) lastBackoffSec = gameSeconds;
             lastBackoffs = pacer.Backoffs;
             lastEscalations = pacer.Escalations;
+            lastSpikes = pacer.Spikes;
         }
 
         // True when a blueprint observation took the tick, which then renders nothing either.
@@ -458,6 +468,7 @@ namespace IngameScript
                 if (pass != null && sortPassSeconds > 0.0 && gameSeconds - sortPassStartSec >= sortPassSeconds) pass.Stop();
                 var r = driver.Step();
                 if (driver.LastCompleted is CraftJob) blueprintProbe.ProbeExecuted();
+                if (driver.LastCompleted == ledgerJob) warmedUp = true;
                 // A bottle sweep keeps the fast cadence for its whole duration whatever each tick did, but never
                 // bumps movesThisCycle — a sweep is maintenance, so EndCycle's active/idle decision stays driven
                 // by the sort's own moves.
@@ -937,9 +948,13 @@ namespace IngameScript
             {
                 ledgerJob.Rearm(sortSources, ledgerKinds, countPools, assemblerStates);
                 stockStale = true;
-                planJob.Rearm();
                 driver.Enqueue(ledgerJob);
-                driver.Enqueue(planJob);   // the plan tick enqueues the craft actions (if any) and then the sort
+                // A warming PB that is outranked must not plan: the plan already claims assemblers.
+                if (leader == null)
+                {
+                    planJob.Rearm();
+                    driver.Enqueue(planJob);   // the plan tick enqueues the craft actions (if any) and then the sort
+                }
             }
             movesThisCycle = 0;
             lastManaged = scan.Managed.Count;
@@ -1054,6 +1069,9 @@ namespace IngameScript
         {
             var grid = Me.CubeGrid;
             var rank = PeerElection.Rank(leadPriority, grid.IsStatic, grid.GridSizeEnum == MyCubeSize.Large);
+            // Before the first fetch the scope is empty and would drop every peer heard, so a PB compiled while docked
+            // would lead the whole docked group until the next heartbeat.
+            if (scope.Count == 0) RefreshScope(scope);
             while (leadListener.HasPendingMessage)
             {
                 var m = leadListener.AcceptMessage();
@@ -1071,8 +1089,9 @@ namespace IngameScript
             if (election.TakeHeartbeat(gameSeconds))
             {
                 IGC.SendBroadcastMessage(LeadChannel, new MyTuple<long, long, string>(rank, Me.EntityId, Me.CustomName + " on " + grid.CustomName), LeadRange);
-                // A standing-by PB fetches nothing, so this is how it notices a split or an undock that frees it.
-                if (leader != null) RefreshScope(scope);
+                // A standing-by PB fetches nothing, so this is how it notices a split or an undock that frees it. A
+                // warming one is mid-cycle, whose classify reads the scope and whose own probe watches the connectors.
+                if (leader != null && !driver.HasWork) RefreshScope(scope);
             }
             var lead = election.Leader(IGC.Me, rank, gameSeconds);
             if (lead != leader)
@@ -1180,7 +1199,11 @@ namespace IngameScript
             parkSim = Pacer.DefaultParkSim;
             resumeSim = Pacer.DefaultResumeSim;
             backoffSim = Pacer.DefaultBackoffSim;
+            spikeMs = Pacer.DefaultSpikeMs;
+            spikeHoldSeconds = Pacer.DefaultSpikeHoldSec;
+            spikeGraceSeconds = Pacer.DefaultSpikeGraceSec;
             pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
+            pacer.SetSpike(spikeMs, spikeHoldSeconds, spikeGraceSeconds);
             utcOffsetHours = 0;
             reactorFillPct = 15;
             gasGenFillPct = 50;
@@ -1265,6 +1288,9 @@ namespace IngameScript
                 else if (key == ParkSimKey) ok = InRange(val, 0.0, 0.99, ref parkSim);
                 else if (key == ResumeSimKey) ok = InRange(val, 0.0, 1.0, ref resumeSim);
                 else if (key == BackoffSimKey) ok = InRange(val, 0.0, 1.0, ref backoffSim);
+                else if (key == SpikeMsKey) ok = InRange(val, 0.001, 1000.0, ref spikeMs);
+                else if (key == SpikeHoldKey) ok = InRange(val, 0.0, 1e6, ref spikeHoldSeconds);
+                else if (key == SpikeGraceKey) ok = InRange(val, 0.0, 1e6, ref spikeGraceSeconds);
                 else if (key == UtcOffsetKey) ok = InRange(val, -14.0, 14.0, ref utcOffsetHours);
                 else if (key == ReactorFillKey) ok = InRange(val, 0.0, 100.0, ref reactorFillPct);
                 else if (key == GasGenFillKey) ok = InRange(val, 0.0, 100.0, ref gasGenFillPct);
@@ -1282,6 +1308,7 @@ namespace IngameScript
                 resumeSim = Pacer.DefaultResumeSim;
             }
             pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
+            pacer.SetSpike(spikeMs, spikeHoldSeconds, spikeGraceSeconds);
             // Only asks: this document is discarded, and the write rides the save tick like every other flush.
             SettingsEntries();
             if (store.AddMissing(SettingsSection, settingsEntries)) fillSettings = flushPending = true;
@@ -1317,6 +1344,7 @@ namespace IngameScript
                  // Said outright, since a setting that didn't take shows only as behaviour that didn't change.
                  + "\npriority " + leadPriority + (factionShare ? ", factionShare" : "") + (dockedProduction ? ", dockedProduction" : "") + (dockedFuel ? ", dockedFuel" : "")
                  + "\npeakMs " + peakMs + ", parkSim " + parkSim + ", resumeSim " + resumeSim + ", backoffSim " + backoffSim
+                 + "\nspikeMs " + spikeMs + ", spikeHoldSeconds " + spikeHoldSeconds + ", spikeGraceSeconds " + spikeGraceSeconds
                  + "\nfill % " + reactorFillPct + "/" + gasGenFillPct + "/" + refineryFillPct
                  + ", bottles " + bottleSweepMinutes + " min, pass " + sortPassSeconds + " s, UTC" + (utcOffsetHours < 0 ? "" : "+") + utcOffsetHours;
         }
@@ -1381,6 +1409,9 @@ namespace IngameScript
             Setting(ParkSimKey, parkSim);
             Setting(ResumeSimKey, resumeSim);
             Setting(BackoffSimKey, backoffSim);
+            Setting(SpikeMsKey, spikeMs);
+            Setting(SpikeHoldKey, spikeHoldSeconds);
+            Setting(SpikeGraceKey, spikeGraceSeconds);
         }
 
         // bool.ToString() is "False"; the guide and the parser's examples use lower case.
@@ -1536,7 +1567,7 @@ namespace IngameScript
             if (statusLcd == null) return;
             BuildCategoryFills();
             BuildReserveFills();
-            // THROTTLED is deliberately NOT surfaced here — a spike back-off is common and expected (mostly
+            // THROTTLED is deliberately NOT surfaced here — a breach back-off is common and expected (mostly
             // limiter-dropped GC stalls), so it would just be noise; it stays on [SHEPHERD-DEBUG].
             var health = pacer.Halted ? "HALTED" : learnMode ? "learning" : activelyWorking ? "working" : "idle";
             StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, health, Clock.Hms(CurrentTime()), categoryFills, reserveFills, statusMessages,
