@@ -370,6 +370,18 @@ namespace SHEPHERD.Tests
         }
 
         [Fact]
+        public void AllAutomaticOnlyWhenEveryQuotaCrafts()
+        {
+            var pool = new ReservePool("Quotas");
+            Assert.True(pool.AllAutomatic());
+            pool.SetQuota("Component/SteelPlate", new Quota(QuotaMode.Min, 500, true));
+            pool.SetQuota("Component/Motor", new Quota(QuotaMode.Exact, 50, true));
+            Assert.True(pool.AllAutomatic());
+            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
+            Assert.False(pool.AllAutomatic());
+        }
+
+        [Fact]
         public void WithAmountKeepsModeLettersAndAutomaticFlag()
         {
             Quota q;

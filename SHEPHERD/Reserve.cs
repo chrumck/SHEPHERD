@@ -126,6 +126,14 @@ namespace IngameScript
 
         // Containers carrying this pool's tag in the current scan; zero means the pool's quotas have nowhere to land.
         public int Containers;
+
+        // Crafting counts every pool's quotas against grid-wide stock, so a pool of only A lines works with no container.
+        public bool AllAutomatic()
+        {
+            foreach (var q in quotas.Values) if (!q.AutomaticProduction) return false;
+            return true;
+        }
+
         // Per-item units in the pool's containers. For an unconfigured pool this holds every item present, so its
         // levels LCD can list the keys the user needs to write quotas.
         public Dictionary<string, double> Counts => counts;

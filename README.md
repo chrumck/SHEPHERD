@@ -39,6 +39,9 @@ whenever the server has it loaded, whether or not you're at it. Run both:
    it into `%AppData%\SpaceEngineers\IngameScripts\local\SHEPHERD\`.
 2. Build a programmable block, open **Edit → Browse Scripts → SHEPHERD**, then **Check Code** and **OK**.
 3. Tag your containers (below). SHEPHERD starts itself — no timer block, no argument.
+4. Give it a minute or two to get going after any start: a compile, a server restart, or your grids loading when
+   you log in or arrive in a sector. A script's first runs are its slowest, so SHEPHERD spaces them out on purpose
+   to stay under the server's runtime limits.
 
 ---
 
@@ -184,7 +187,6 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `backoffSim` | `0.9` | 0–1 | The `peakMs` back-off applies only below this sim speed. `1` = always, `0` = never. |
 | `spikeMs` | `5` | 0.001–1000 | A run longer than this pauses SHEPHERD's heavy work and screens for `spikeHoldSeconds`, at any sim speed. |
 | `spikeHoldSeconds` | `6` | ≥ 0 | How long that pause lasts, in game seconds. `0` = no pause. |
-| `spikeGraceSeconds` | `60` | ≥ 0 | No such pause this long after the script starts, so the slow first cycle after a compile runs straight through. |
 
 **Machines.** A machine below its target pulls fuel or ore ahead of storage, refilled once it has burnt a
 quarter of the target; a refinery on a shortage you set up is filled at once. Output is collected every
@@ -199,8 +201,9 @@ long interval.
 0.7). **Raising `peakMs` or lowering `parkSim`/`backoffSim` lets SHEPHERD run into the limiter's
 punishment** — change them only for a server with different limits or a test world. Destiny also punishes
 three runs over 10 ms within 10 s at any sim speed; a 6 s pause after every run over 5 ms keeps any 10 s to at most
-two such runs, so raise `spikeMs` or shorten `spikeHoldSeconds` with the same care. The first runs after a compile
-are the slow ones, and that rule has never punished them, so `spikeGraceSeconds` skips the pause right after a start.
+two such runs, so raise `spikeMs` or shorten `spikeHoldSeconds` with the same care. That rule applies from the
+first runs after a grid loads, which are the slow ones, so SHEPHERD's first cycle after a start takes a minute or two.
+A `spikeGraceSeconds` line left by v1.0.3–v1.0.4 now logs `unknown setting`; delete it.
 
 **Mistakes are reported, never guessed.** An unknown key logs `unknown setting '<key>'`; a bad or
 out-of-range value logs `bad setting '<key>=<value>'` and keeps the default. `configReload` shows what was
@@ -210,7 +213,7 @@ read in the programmable block's detail pane (a toggle missing from the `priorit
 reloaded 2 pools, 14 quotas, 3 overrides, 0 facts
 priority 0, dockedProduction
 peakMs 0.8, parkSim 0.75, resumeSim 0.8, backoffSim 0.9
-spikeMs 5, spikeHoldSeconds 6, spikeGraceSeconds 60
+spikeMs 5, spikeHoldSeconds 6
 fill % 15/50/30, bottles 3 min, pass 60 s, UTC+1
 ```
 
@@ -228,7 +231,7 @@ several containers.
 
 1. **Pool names are case-sensitive:** `[SHEPHERD-RESERVE:Ammo]` pairs with `[Reserve:Ammo]`, not
    `[Reserve:ammo]`. A mismatch shows as `reserve Ammo has no quota section` plus `reserve ammo quotas unused -
-   no container`.
+   no container` (not shown for a section of only `A` lines, which needs no container — see below).
 2. **A pool without quotas is left alone** — tagging never empties a container (the bottle sweep still
    refills its gas bottles, which come back to it).
 3. **A pool with quotas holds only what they name:** anything else in it moves out to its category.
@@ -271,7 +274,8 @@ A trailing `A` lets SHEPHERD make the difference. Crafting needs an assembler ta
 | `500A` | Both. |
 
 1. Fuel and ore already loaded into reactors, generators and refineries are spoken for; everything else counts,
-   assembler contents and machine output included.
+   assembler contents and machine output included. Since the count is grid-wide, a pool made only of `A` lines
+   needs no container: a `[Reserve:Quotas]` section of crafting targets works on its own.
 2. Ingots are refined, never disassembled (`500LA` on an ingot acts as `500L`). Ore can't be made. `AllA`
    is invalid.
 3. **Assembling adds to queues and never takes away your units** — SHEPHERD never clears or reorders queues.
@@ -535,4 +539,15 @@ SHEPHERD on the same grid** — load SHEPHERD into the old programmable block or
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright (C) 2026 Tomasz Dobrowolski.
+
+SHEPHERD is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
+later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full
+text (SPDX: `GPL-3.0-or-later`).
+
+The script on the Steam Workshop and mod.io is a minified build of this source. Anyone who republishes it, or a
+modified version, must point to its full source as well.
+
+Versions 1.0.0 to 1.0.3 were released under the MIT license and remain available under it.

@@ -37,9 +37,9 @@ namespace IngameScript
     //     bar of 1 arms it at any sim, for a limiter that enforces regardless of sim speed. Reducing exposure is
     //     the only lever, since we can't stop the first breach (a tick late) or see GC to match the limiter's
     //     GC-drop from the sandbox;
-    //   * a spike hold — past a startup grace, a run far over the peak bar holds heavies and parks at ANY sim, so cold
-    //     paths (a resume after stand-by runs methods the startup never called, and the first run compiles them)
-    //     can't land close together where a server punishes a few long runs regardless of sim speed;
+    //   * a spike hold — a run far over the peak bar holds heavies and parks at ANY sim, so cold paths (the first
+    //     run of every method is slow, whether after a compile, a grid load or a resume from stand-by) can't land
+    //     close together where a server punishes a few long runs regardless of sim speed;
     //   * dynamic cadence — fast only while a backlog drains, moderate otherwise, rare only under a safety park.
     public sealed class Pacer
     {
@@ -61,8 +61,6 @@ namespace IngameScript
         double backoffSim = DefaultBackoffSim; // the breach back-off arms only while the sim is below this; 1 = at any sim
         double spikeMs = DefaultSpikeMs;       // a run over this starts the spike hold
         double spikeHoldSec = DefaultSpikeHoldSec; // its length; 0 = no hold
-        double spikeGraceSec = DefaultSpikeGraceSec; // no spike hold this long after start
-        double sinceStart;      // sim-time since this PB started
         // A tick whose game/wall ratio is below this was not slow, it was ABSENT: the game was paused, alt-tabbed,
         // or saving, so game time froze while the wall clock ran on. Such an interval carries no sim-speed
         // information at all — and taken as a measurement it reads as a ~50x-or-worse slowdown, which would
@@ -83,13 +81,11 @@ namespace IngameScript
         const double SimWaryWindowSec = 5.0;
         public const int WaryDips = 2;       // dips within the window before heavies are held and the cadence slows
         public const int ParkDips = 3;       // dips within the window before the full park
-        // Destiny punishes 3 runs over 10 ms within 10 s at any sim speed. A hold longer than half that window lets
-        // at most two spikes into one, whatever caused them; the bar sits well above any steady-state run.
+        // Destiny punishes 3 runs over 10 ms within 10 s at any sim speed, from the first runs after a grid loads. A
+        // hold longer than half that window lets at most two spikes into one, whatever caused them; the bar sits well
+        // above any steady-state run.
         public const double DefaultSpikeMs = 5.0;
         public const double DefaultSpikeHoldSec = 6.0;
-        // Cold starts have never been punished on Destiny, so its enforcer has a startup grace of its own; holding
-        // inside it only delays the slow first cycle.
-        public const double DefaultSpikeGraceSec = 60.0;
         const double StandDownSec = 30.0;    // cooperative hold after a GracefulShutDown:: signal — let the offense window age out
         const double CrashHoldSec = 2.0;     // hold after a crashing step so it can never fast-loop
         const int MaxConsecutiveCrashes = 5; // this many crashes with no clean run between → open the breaker (park at idle)
@@ -125,11 +121,10 @@ namespace IngameScript
             backoffSim = backoffBelowSim;
         }
 
-        public void SetSpike(double overMs, double holdSeconds, double graceSeconds)
+        public void SetSpike(double overMs, double holdSeconds)
         {
             spikeMs = overMs;
             spikeHoldSec = holdSeconds;
-            spikeGraceSec = graceSeconds;
         }
 
         public bool SimParked => simParked;
@@ -143,7 +138,7 @@ namespace IngameScript
         // A spike hold is running: no heavy call and no panel render, which can be a cold path too.
         public bool Cooling => spikeSec > 0.0;
 
-        // Runs over the spike bar since the startup grace ended; each one is worth a log line.
+        // Runs over the spike bar; each one is worth a log line.
         public int Spikes { get; private set; }
 
         // How many times a cadence back-off has ENGAGED since the last reset (each fresh engagement, not each
@@ -185,7 +180,6 @@ namespace IngameScript
             backoffSec = Age(backoffSec, dtSeconds);
             standDownSec = Age(standDownSec, dtSeconds);
             spikeSec = Age(spikeSec, dtSeconds);
-            sinceStart += dtSeconds;
             simWarySec = Age(simWarySec, dtSeconds);
             if (simWarySec <= 0.0) simDipCount = 0;
 
@@ -236,7 +230,7 @@ namespace IngameScript
             if (workPending && lastRunMs > breachMs
                 && (backoffSim >= 1.0 || simInstant < backoffSim || SimAvg < backoffSim)) ArmBackoff();
 
-            if (lastRunMs > spikeMs && sinceStart >= spikeGraceSec)
+            if (lastRunMs > spikeMs)
             {
                 Spikes++;
                 spikeSec = spikeHoldSec;
@@ -268,12 +262,13 @@ namespace IngameScript
             return backlog ? Cadence.Working : Cadence.Idle;
         }
 
-        // Arm the refractory the instant a heavy call is dispatched (before its cost is known), so the very next
-        // tick cannot fire a second one; Observe then lengthens it once the measured cost arrives.
+        // Arm the refractory the instant a heavy call is dispatched (before its cost is known), so neither the rest of
+        // this tick nor the very next one can fire a second; Observe then lengthens it once the measured cost arrives.
         public void NotifyHeavyFired()
         {
             firedLastTick = true;
             holdSec = Higher(holdSec, BaseHoldSec);
+            AllowHeavy = false;
         }
 
         // The limiter fired the cooperative GracefulShutDown:: argument — it is about to punish us. Hold every

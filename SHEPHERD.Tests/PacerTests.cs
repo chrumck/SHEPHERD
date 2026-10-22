@@ -43,14 +43,6 @@ namespace SHEPHERD.Tests
             return p;
         }
 
-        // Spike-hold mechanics tests start past the startup grace, where every spike holds.
-        static Pacer PastGrace()
-        {
-            var p = new Pacer();
-            p.SetSpike(Pacer.DefaultSpikeMs, Pacer.DefaultSpikeHoldSec, 0.0);
-            return p;
-        }
-
         static void Dips(Pacer p, int count)
         {
             for (var i = 0; i < count; i++) Observe(p, 0.0, Window, true, LaggedSim);
@@ -100,6 +92,16 @@ namespace SHEPHERD.Tests
             p.NotifyHeavyFired();
             Observe(p, 0.0, Tick, true, HealthySim); // one tick later — cost unknown yet, provisional hold still holds
             Assert.False(p.AllowHeavy); // never two heavies on consecutive ticks
+        }
+
+        [Fact]
+        public void HeavyFiredBlocksTheRestOfItsTick()
+        {
+            var p = new Pacer();
+            Observe(p, 0.0, Tick, true, HealthySim);
+            Assert.True(p.AllowHeavy);
+            p.NotifyHeavyFired(); // the election's scope scan runs ahead of the tick's own step
+            Assert.False(p.AllowHeavy);
         }
 
         [Fact]
@@ -214,7 +216,7 @@ namespace SHEPHERD.Tests
         [Fact]
         public void SpikeHoldsHeavyAndParksAtAHealthySimThenClears()
         {
-            var p = PastGrace(); // default bars: a plain breach at a healthy sim arms nothing
+            var p = new Pacer(); // default bars: a plain breach at a healthy sim arms nothing
             Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
             Assert.True(p.Cooling);
             Assert.True(p.Throttled);
@@ -229,7 +231,7 @@ namespace SHEPHERD.Tests
         [Fact]
         public void SpikeWhileIdleStillHolds()
         {
-            var p = PastGrace();
+            var p = new Pacer();
             Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, false, HealthySim); // a cold render on an idle tick counts too
             Assert.True(p.Cooling);
             Assert.Equal(Cadence.Parked, p.NextCadence(false));
@@ -239,7 +241,7 @@ namespace SHEPHERD.Tests
         public void SpikeHoldOutlastsHalfOfTenSeconds()
         {
             // Destiny punishes three runs over 10 ms within 10 s; spacing spikes by more than 5 s admits at most two.
-            var p = PastGrace();
+            var p = new Pacer();
             Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
             Observe(p, 0.0, 5.0, true, HealthySim);
             Assert.True(p.Cooling);
@@ -249,7 +251,7 @@ namespace SHEPHERD.Tests
         [Fact]
         public void BreachUnderTheSpikeBarDoesNotCool()
         {
-            var p = PastGrace();
+            var p = new Pacer();
             Observe(p, Pacer.DefaultSpikeMs - 1.0, Tick, true, HealthySim);
             Assert.False(p.Cooling);
             Assert.Equal(0, p.Spikes);
@@ -258,7 +260,7 @@ namespace SHEPHERD.Tests
         [Fact]
         public void EverySpikeIsCounted()
         {
-            var p = PastGrace();
+            var p = new Pacer();
             Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
             Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim); // inside the hold: still worth its own log line
             Assert.Equal(2, p.Spikes);
@@ -267,11 +269,11 @@ namespace SHEPHERD.Tests
         [Fact]
         public void SpikeBarAndHoldAreSettable()
         {
-            var p = PastGrace();
-            p.SetSpike(20.0, 6.0, 0.0);
+            var p = new Pacer();
+            p.SetSpike(20.0, 6.0);
             Observe(p, 15.0, Tick, true, HealthySim);   // over the default bar, under the configured one
             Assert.False(p.Cooling);
-            p.SetSpike(Pacer.DefaultSpikeMs, 0.0, 0.0); // no hold: the spike is still counted
+            p.SetSpike(Pacer.DefaultSpikeMs, 0.0); // no hold: the spike is still counted
             Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
             Assert.False(p.Cooling);
             Assert.True(p.AllowHeavy);
@@ -279,22 +281,13 @@ namespace SHEPHERD.Tests
         }
 
         [Fact]
-        public void SpikeInsideTheStartupGraceNeitherHoldsNorCounts()
+        public void SpikeOnTheFirstRunHolds()
         {
+            // Destiny punished the cold first cycle of grids loaded at login, so there is no startup grace.
             var p = new Pacer();
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim); // a cold first run after compile
-            Assert.False(p.Cooling);
-            Assert.True(p.AllowHeavy);
-            Assert.Equal(0, p.Spikes);
-        }
-
-        [Fact]
-        public void SpikeHoldsOnceTheStartupGraceHasPassed()
-        {
-            var p = new Pacer();
-            Observe(p, 0.0, Pacer.DefaultSpikeGraceSec, true, HealthySim);
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim); // a cold path first run on a resume
+            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
             Assert.True(p.Cooling);
+            Assert.False(p.AllowHeavy);
             Assert.Equal(1, p.Spikes);
         }
 

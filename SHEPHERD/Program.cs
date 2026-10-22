@@ -26,12 +26,14 @@ namespace IngameScript
     public partial class Program : MyGridProgram
     {
         #region mdk preserve
-        // SHEPHERD inventory sorter. Setup, tags, and categories: README.md.
+        // SHEPHERD inventory sorter. Copyright (C) 2026 Tomasz Dobrowolski. GPL-3.0-or-later, without any
+        // warranty. Source and full license: github.com/chrumck/SHEPHERD
+        // Setup, tags, and categories: README.md.
         // Settings live in this programmable block's Custom Data, [Settings] section (README "Settings"),
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.3";
+        const string ScriptVersion = "1.0.5";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -100,7 +102,6 @@ namespace IngameScript
         const string BackoffSimKey = "backoffSim";
         const string SpikeMsKey = "spikeMs";
         const string SpikeHoldKey = "spikeHoldSeconds";
-        const string SpikeGraceKey = "spikeGraceSeconds";
         const string UtcOffsetKey = "utcOffsetHours";
         const string ReactorFillKey = "reactorFillPct";
         const string GasGenFillKey = "gasGenFillPct";
@@ -164,7 +165,7 @@ namespace IngameScript
         bool dockedProduction;           // [Settings]: also manage docked refineries and assemblers
         bool dockedFuel;                 // [Settings]: also top up docked reactors and gas generators
         // [Settings]: the limiter bars the Pacer throttles against, kept here for the configReload readback.
-        double peakMs, parkSim, resumeSim, backoffSim, spikeMs, spikeHoldSeconds, spikeGraceSeconds;
+        double peakMs, parkSim, resumeSim, backoffSim, spikeMs, spikeHoldSeconds;
         // [Settings]: hours added to UTC for the clock (display only); how full to keep each machine kind's input,
         // as a percent of its max volume (0 = don't feed that kind); minutes between bottle sweeps (0 = none).
         double utcOffsetHours, reactorFillPct, gasGenFillPct, refineryFillPct, bottleSweepMinutes;
@@ -686,6 +687,17 @@ namespace IngameScript
             into.Build(connectorBuffer, Me.CubeGrid, Me.OwnerId, factionShare, dockedProduction, dockedFuel);
         }
 
+        // The election runs ahead of the tick's own heavy gate, so its scans take the gate themselves: a cold first
+        // scan inside a spike hold, or sharing a run with the first fetch, is the third run over 10 ms that Destiny
+        // punishes. A skipped scan waits for an allowed tick; until then the PB does no work to lead with anyway.
+        void ScanScopeAsHeavy()
+        {
+            if (!pacer.AllowHeavy) return;
+            RefreshScope(scope);
+            lastTickKind = RunKind.Fetch;
+            pacer.NotifyHeavyFired();
+        }
+
         // Re-count the grid and its docked constructs while a cycle is in flight, and abandon the cycle if the grid
         // shrank materially or a construct docked, undocked or was split off — so the jobs stop working from a
         // picture that includes blocks the world no longer has (a small ship's undock is under the shrink bar, yet
@@ -1071,7 +1083,7 @@ namespace IngameScript
             var rank = PeerElection.Rank(leadPriority, grid.IsStatic, grid.GridSizeEnum == MyCubeSize.Large);
             // Before the first fetch the scope is empty and would drop every peer heard, so a PB compiled while docked
             // would lead the whole docked group until the next heartbeat.
-            if (scope.Count == 0) RefreshScope(scope);
+            if (scope.Count == 0) ScanScopeAsHeavy();
             while (leadListener.HasPendingMessage)
             {
                 var m = leadListener.AcceptMessage();
@@ -1091,7 +1103,7 @@ namespace IngameScript
                 IGC.SendBroadcastMessage(LeadChannel, new MyTuple<long, long, string>(rank, Me.EntityId, Me.CustomName + " on " + grid.CustomName), LeadRange);
                 // A standing-by PB fetches nothing, so this is how it notices a split or an undock that frees it. A
                 // warming one is mid-cycle, whose classify reads the scope and whose own probe watches the connectors.
-                if (leader != null && !driver.HasWork) RefreshScope(scope);
+                if (leader != null && !driver.HasWork) ScanScopeAsHeavy();
             }
             var lead = election.Leader(IGC.Me, rank, gameSeconds);
             if (lead != leader)
@@ -1201,9 +1213,8 @@ namespace IngameScript
             backoffSim = Pacer.DefaultBackoffSim;
             spikeMs = Pacer.DefaultSpikeMs;
             spikeHoldSeconds = Pacer.DefaultSpikeHoldSec;
-            spikeGraceSeconds = Pacer.DefaultSpikeGraceSec;
             pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
-            pacer.SetSpike(spikeMs, spikeHoldSeconds, spikeGraceSeconds);
+            pacer.SetSpike(spikeMs, spikeHoldSeconds);
             utcOffsetHours = 0;
             reactorFillPct = 15;
             gasGenFillPct = 50;
@@ -1290,7 +1301,6 @@ namespace IngameScript
                 else if (key == BackoffSimKey) ok = InRange(val, 0.0, 1.0, ref backoffSim);
                 else if (key == SpikeMsKey) ok = InRange(val, 0.001, 1000.0, ref spikeMs);
                 else if (key == SpikeHoldKey) ok = InRange(val, 0.0, 1e6, ref spikeHoldSeconds);
-                else if (key == SpikeGraceKey) ok = InRange(val, 0.0, 1e6, ref spikeGraceSeconds);
                 else if (key == UtcOffsetKey) ok = InRange(val, -14.0, 14.0, ref utcOffsetHours);
                 else if (key == ReactorFillKey) ok = InRange(val, 0.0, 100.0, ref reactorFillPct);
                 else if (key == GasGenFillKey) ok = InRange(val, 0.0, 100.0, ref gasGenFillPct);
@@ -1308,7 +1318,7 @@ namespace IngameScript
                 resumeSim = Pacer.DefaultResumeSim;
             }
             pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
-            pacer.SetSpike(spikeMs, spikeHoldSeconds, spikeGraceSeconds);
+            pacer.SetSpike(spikeMs, spikeHoldSeconds);
             // Only asks: this document is discarded, and the write rides the save tick like every other flush.
             SettingsEntries();
             if (store.AddMissing(SettingsSection, settingsEntries)) fillSettings = flushPending = true;
@@ -1344,7 +1354,7 @@ namespace IngameScript
                  // Said outright, since a setting that didn't take shows only as behaviour that didn't change.
                  + "\npriority " + leadPriority + (factionShare ? ", factionShare" : "") + (dockedProduction ? ", dockedProduction" : "") + (dockedFuel ? ", dockedFuel" : "")
                  + "\npeakMs " + peakMs + ", parkSim " + parkSim + ", resumeSim " + resumeSim + ", backoffSim " + backoffSim
-                 + "\nspikeMs " + spikeMs + ", spikeHoldSeconds " + spikeHoldSeconds + ", spikeGraceSeconds " + spikeGraceSeconds
+                 + "\nspikeMs " + spikeMs + ", spikeHoldSeconds " + spikeHoldSeconds
                  + "\nfill % " + reactorFillPct + "/" + gasGenFillPct + "/" + refineryFillPct
                  + ", bottles " + bottleSweepMinutes + " min, pass " + sortPassSeconds + " s, UTC" + (utcOffsetHours < 0 ? "" : "+") + utcOffsetHours;
         }
@@ -1411,7 +1421,6 @@ namespace IngameScript
             Setting(BackoffSimKey, backoffSim);
             Setting(SpikeMsKey, spikeMs);
             Setting(SpikeHoldKey, spikeHoldSeconds);
-            Setting(SpikeGraceKey, spikeGraceSeconds);
         }
 
         // bool.ToString() is "False"; the guide and the parser's examples use lower case.
@@ -1785,7 +1794,7 @@ namespace IngameScript
             {
                 if (pool.Containers > 0 && pool.QuotaCount == 0)
                     (homePools.Contains(pool.Name) ? reserveStates : shipPoolStates).Add("reserve " + ReservePool.Label(pool.Name) + " has no quota section");
-                else if (pool.QuotaCount > 0 && pool.Containers == 0)
+                else if (pool.QuotaCount > 0 && pool.Containers == 0 && !pool.AllAutomatic())
                     (pool.Docked ? shipPoolStates : reserveStates).Add("reserve " + ReservePool.Label(pool.Name) + " quotas unused - no container");
             }
             ReservePool.SharedAll(reservePools, allFirstPool, reserveStates);
