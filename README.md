@@ -185,9 +185,9 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `parkSim` | `0.75` | 0–0.99 | Park while sim speed keeps dropping below this. `0` = never park. |
 | `resumeSim` | `0.8` | up to 1 | Resume once average sim speed is back above this. Must be ≥ `parkSim`, or both revert. |
 | `backoffSim` | `1` | 0–1 | The `peakMs` back-off applies only below this sim speed. `1` = always, `0` = never. |
-| `spikeMs` | `8` | 0.001–1000 | A run longer than this is a spike. At any sim speed, a second spike within `spikeWindowSeconds` pauses SHEPHERD's heavy work and screens until the first is that old. |
-| `spikeWindowSeconds` | `10.5` | ≥ 0 | That window, in game seconds. `0` = no pause. |
-| `startupSeconds` | `45` | ≥ 0 | For this long after a start (real seconds), SHEPHERD bundles its slow first steps into fewer runs and skips the `peakMs` back-off. Keep it inside your server's startup allowance. `0` = off. |
+| `spikeMs` | `8` | 0.001–1000 | A run longer than this is a spike, its time divided by sim speed. At any sim speed, a second spike within `spikeWindowSeconds` pauses SHEPHERD's heavy work and screens until the first is that old. |
+| `spikeWindowSeconds` | `10.5` | ≥ 0 | That window, in real seconds. `0` = no pause. |
+| `startupSeconds` | `45` | ≥ 0 | For this long after a start (real seconds), SHEPHERD bundles its slow first steps into fewer runs and skips the `peakMs` back-off and the `parkSim` park. Keep it inside your server's startup allowance. `0` = off. |
 
 **Machines.** A machine below its target pulls fuel or ore ahead of storage, refilled once it has burnt a
 quarter of the target; a refinery on a shortage you set up is filled at once. Output is collected every

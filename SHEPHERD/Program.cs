@@ -33,7 +33,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.21";
+        const string ScriptVersion = "1.0.22";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -407,7 +407,7 @@ namespace IngameScript
 
             // The limiter checks nothing in its startup allowance, so a start's slow runs arm no back-off: it would
             // only hold back the next cold path.
-            pacer.Observe(lastRunMs, dt, activelyWorking && !starting, wall);
+            pacer.Observe(lastRunMs, dt, activelyWorking && !starting, wall, starting);
             if (pacer.SimParked != simParkLogged)
             {
                 simParkLogged = pacer.SimParked;

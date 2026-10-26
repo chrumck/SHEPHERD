@@ -17,7 +17,7 @@ namespace SHEPHERD.Tests
 
         // The tests speak sim ratios; the Pacer takes the wall time the interval took.
         static void Observe(Pacer p, double ms, double dt, bool work, double sim) =>
-            p.Observe(ms, dt, work, sim > 0.0 ? dt / sim : 0.0);
+            p.Observe(ms, dt, work, sim > 0.0 ? dt / sim : 0.0, false);
 
         // Observe with a heavy's measured cost, then keep observing cheap ticks until a heavy is allowed again;
         // returns how many observations that took. Larger = a longer refractory.
@@ -315,6 +315,56 @@ namespace SHEPHERD.Tests
             Assert.False(p.Quiet);
             Assert.True(p.AllowHeavy);
             Assert.Equal(2, p.Spikes);
+        }
+
+        static Pacer NoSimPark()
+        {
+            var p = new Pacer();
+            p.SetBars(Pacer.DefaultPeakMs, 0.0, Pacer.DefaultResumeSim, Pacer.DefaultBackoffSim);
+            return p;
+        }
+
+        [Fact]
+        public void UnderLagTheSpikeHoldEndsOnTheWallClock()
+        {
+            // At sim 0.1 the window's 10.5 s of wall time is only ~1 s of game time.
+            const double sim = 0.1;
+            var p = NoSimPark();
+            Observe(p, SpikeRun, Window, false, sim);
+            Observe(p, SpikeRun, Window, false, sim);
+            Assert.True(p.Quiet);
+            Observe(p, 0.0, (Pacer.DefaultSpikeWindowSec + 0.1) * sim, false, sim);
+            Assert.False(p.Quiet);
+        }
+
+        [Fact]
+        public void UnderLagAShorterRunIsChargedAsASpike()
+        {
+            // The server divides each run by the sim ratio, so at sim 0.5 a 5 ms run counts as 10 ms.
+            var p = NoSimPark();
+            Observe(p, 0.0, Window, false, 0.5);   // the sample that reveals the lag
+            Observe(p, 5.0, Window, false, 0.5);
+            Assert.Equal(1, p.Spikes);
+            var healthy = NoSimPark();
+            Observe(healthy, 0.0, Window, false, HealthySim);
+            Observe(healthy, 5.0, Window, false, HealthySim);
+            Assert.Equal(0, healthy.Spikes);
+        }
+
+        [Fact]
+        public void LagWhileStartingNeverParksAndParksOnceTheStartEnds()
+        {
+            // The limiter charges nothing inside its startup allowance, so a park there only spends it.
+            var p = new Pacer();
+            for (var i = 0; i < 10 * Pacer.ParkDips; i++)
+            {
+                p.Observe(0.0, Window, true, Window / LaggedSim, true);
+                Assert.False(p.SimParked);
+                Assert.False(p.SimWary);
+            }
+            Assert.True(p.AllowHeavy);
+            Dips(p, Pacer.ParkDips);
+            Assert.True(p.SimParked);
         }
 
         [Fact]
@@ -795,8 +845,8 @@ namespace SHEPHERD.Tests
             var p = new Pacer();
             for (var i = 0; i < 200; i++)
             {
-                p.Observe(0.0, Tick, true, 0.0);             // the clock had not ticked over...
-                p.Observe(0.0, Tick, true, 2 * Tick);        // ...so the next interval carries both
+                p.Observe(0.0, Tick, true, 0.0, false);          // the clock had not ticked over...
+                p.Observe(0.0, Tick, true, 2 * Tick, false);     // ...so the next interval carries both
             }
             Assert.False(p.SimWary);
             Assert.True(p.SimAvg > 0.97 && p.SimAvg < 1.03, "avg " + p.SimAvg);
@@ -844,7 +894,7 @@ namespace SHEPHERD.Tests
         {
             var p = new Pacer();
             for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
-            p.Observe(0.0, Tick, true, -1.0);
+            p.Observe(0.0, Tick, true, -1.0, false);
             Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(1.0, p.SimInstant, 6);
         }

@@ -13,7 +13,8 @@ namespace IngameScript
 
     // The one adaptive controller. A PB cannot read its own in-run time, so every decision is driven by the
     // PREVIOUS run's wall-clock ms (Runtime.LastRunTimeMs) — one tick late by necessity. It unifies the limiter
-    // defenses over sim-time timers (never a tick count — sim-time tracks sim-speed, as the limiter does):
+    // defenses over sim-time timers (never a tick count — sim-time tracks sim-speed, as the limiter does; spike
+    // pacing alone runs on the wall clock, as the rule it keeps under does):
     //   * an adaptive refractory after each heavy (conveyor) call — spacing that grows with the measured cost,
     //     so a hot transfer self-paces and two heavies never land on consecutive ticks;
     //   * a sim-speed park — the limiter charges each run divided by the sim ratio, with no server-side deferral,
@@ -93,8 +94,8 @@ namespace IngameScript
         double holdSec;         // heavy-call refractory remaining (sim-time)
         double backoffSec;      // cadence back-off remaining (sim-time)
         double standDownSec;    // GracefulShutDown stand-down remaining (sim-time)
-        double spikeSec;        // spike hold remaining (sim-time)
-        double clock;           // sim-time since construction, for the spike window
+        double spikeSec;        // spike hold remaining (wall time)
+        double clock;           // wall time since construction, for the spike window
         double lastSpikeAt = -1e9; // when the newest spike landed
         int windowBreaches;     // breaches recorded in the current back-off window; 1 → Recovering, 2+ → Parked (escalation)
         int consecutiveCrashes; // crashing steps since the last clean run; a run of them opens the breaker
@@ -174,15 +175,20 @@ namespace IngameScript
         // Top of every tick: age the timers by the elapsed sim-time and learn from the previous run's cost.
         // wallSeconds is the wall-clock time the same interval took; game ÷ wall over a sample window is the sim
         // estimate — the ratio the limiter divides each run's ms by, a window late. A tick that closes no window
-        // leaves every sim-derived decision as it was.
-        public void Observe(double lastRunMs, double dtSeconds, bool workPending, double wallSeconds)
+        // leaves every sim-derived decision as it was. While starting, no dip is counted: the limiter charges
+        // nothing inside its startup allowance whatever the sim, and that allowance runs on the wall clock, so a
+        // park there only pushes the cold runs out of it — a server restart under deep lag did exactly that.
+        public void Observe(double lastRunMs, double dtSeconds, bool workPending, double wallSeconds, bool starting)
         {
             if (SimWary) WaryTime += dtSeconds;
             if (backoffSec > 0.0) BackoffTime += dtSeconds;
             holdSec = Age(holdSec, dtSeconds);
             backoffSec = Age(backoffSec, dtSeconds);
             standDownSec = Age(standDownSec, dtSeconds);
-            spikeSec = Age(spikeSec, dtSeconds);
+            // The server's rule counts its 10 s on the wall clock; game time under lag stretched one window into
+            // minutes and held the cold runs past the startup allowance.
+            var wallStep = wallSeconds > 0.0 ? wallSeconds : 0.0;
+            spikeSec = Age(spikeSec, wallStep);
             simWarySec = Age(simWarySec, dtSeconds);
             if (simWarySec <= 0.0) simDipCount = 0;
 
@@ -216,7 +222,7 @@ namespace IngameScript
                 var blend = game / (SimAvgTauSec + game);
                 simGameAvg += (game - simGameAvg) * blend;
                 simWallAvg += (wall - simWallAvg) * blend;
-                if (simEstimate < parkSim)
+                if (simEstimate < parkSim && !starting)
                 {
                     if (++simDipCount == WaryDips && !simParked) Waries++;
                     simWarySec = SimWaryWindowSec;
@@ -248,8 +254,9 @@ namespace IngameScript
             if (workPending && lastRunMs > breachMs * (sim < 1.0 ? sim : 1.0)
                 && (backoffSim >= 1.0 || simInstant < backoffSim || SimAvg < backoffSim)) ArmBackoff();
 
-            clock += dtSeconds;
-            if (lastRunMs > spikeMs)
+            clock += wallStep;
+            // Charged like the breach: a server dividing by sim counts a short run under deep lag as a long one.
+            if (lastRunMs > spikeMs * (sim < 1.0 ? sim : 1.0))
             {
                 Spikes++;
                 // Two spikes inside the window: hold until the older is out of it, so a third can't join them.
