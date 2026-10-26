@@ -59,14 +59,17 @@ namespace IngameScript
         readonly List<QueueEntry> queueScratch = new List<QueueEntry>();
 
         // Units SHEPHERD itself queued on one assembler, per blueprint, so a trim only ever takes back its own work.
-        // Capped each plan by what the assembler still holds of the blueprint — built units leave the queue, and a
-        // Coop's batch or the player's own removal can only shrink it. Not persisted: after a recompile nothing is
-        // trimmed until SHEPHERD queues again, which errs toward leaving work alone.
+        // Building and a Coop's batch take from the front of the queue, so each drop in the assembler's units of the
+        // blueprint uses up the units queued Ahead of SHEPHERD's before its own: the player's units queued later sit
+        // behind and never keep the claim alive once its own are built. Last is that count as last seen. A player's
+        // append in the same plan as a drop hides the drop, which can leave one cycle's building in the claim. Not
+        // persisted: after a recompile nothing is trimmed until SHEPHERD queues again, which errs toward leaving
+        // work alone.
         sealed class QueueClaim
         {
             public long Id;
             public string Key, Blueprint;
-            public double Units;
+            public double Units, Ahead, Last;
             public bool Seen;
         }
 
@@ -137,12 +140,44 @@ namespace IngameScript
 
         static bool IsHomeCoop(IMarkedAssembler a) => a.Construct == 0 && a.Mark == AssemblerMark.Coop && a.CanCooperate;
 
-        // Negative units release a claim after a trim.
-        public void Claim(IAssemblerState a, string key, string blueprint, double units)
+        // The count is read before the append, so the new units are known to sit behind everything already queued.
+        public void Append(IAssemblerState a, string key, string blueprint, double units)
         {
-            foreach (var c in claims)
-                if (c.Id == a.Id && c.Blueprint == blueprint) { c.Units += units; return; }
-            if (units > 0) claims.Add(new QueueClaim { Id = a.Id, Key = key, Blueprint = blueprint, Units = units });
+            double removable;
+            var before = Queued(a, blueprint, out removable);
+            a.Append(blueprint, units);
+            var c = Find(a.Id, blueprint);
+            if (c == null) claims.Add(c = new QueueClaim { Id = a.Id, Key = key, Blueprint = blueprint, Ahead = before, Last = before });
+            else Settle(c, before);
+            c.Units += units;
+            c.Last += units;
+        }
+
+        public void Release(IAssemblerState a, string blueprint, double units)
+        {
+            var c = Find(a.Id, blueprint);
+            if (c == null) return;
+            c.Units -= units;
+            c.Last -= units;
+        }
+
+        QueueClaim Find(long id, string blueprint)
+        {
+            foreach (var c in claims) if (c.Id == id && c.Blueprint == blueprint) return c;
+            return null;
+        }
+
+        static void Settle(QueueClaim c, double held)
+        {
+            var drop = c.Last - held;
+            if (drop > 0)
+            {
+                var ahead = Math.Min(drop, c.Ahead);
+                c.Ahead -= ahead;
+                c.Units -= drop - ahead;
+            }
+            c.Last = held;
+            if (c.Units > held) c.Units = held;
         }
 
         // Excess is trimmed only once two plans in a row see it: one snapshot can catch a stack mid-move, or a Coop's
@@ -152,11 +187,15 @@ namespace IngameScript
         {
             // The tracked disassembler was taken over empty, so its whole queue is SHEPHERD's — after a recompile too,
             // which forgets the claims while that queue keeps pulling the item through the conveyor, quota stock included.
+            long whole = 0;
             foreach (var s in assemblers)
             {
                 if (s.State.Id != TrackedDisassembler || !s.State.IsDisassembling) continue;
+                whole = s.State.Id;
                 s.State.QueueInto(queueScratch);
-                foreach (var e in queueScratch) Claim(s.State, facts.ItemOf(e.Blueprint), e.Blueprint, e.Amount);
+                foreach (var e in queueScratch)
+                    if (Find(whole, e.Blueprint) == null)
+                        claims.Add(new QueueClaim { Id = whole, Key = facts.ItemOf(e.Blueprint), Blueprint = e.Blueprint });
             }
             for (var c = claims.Count - 1; c >= 0; c--)
             {
@@ -165,7 +204,8 @@ namespace IngameScript
                 foreach (var s in assemblers) if (s.State.Id == claim.Id) st = s.State;
                 double removable = 0;
                 var held = st == null ? 0 : Queued(st, claim.Blueprint, out removable);
-                if (held < claim.Units) claim.Units = held;
+                Settle(claim, held);
+                if (claim.Id == whole) claim.Units = held;
                 if (claim.Units < 1) { claims.RemoveAt(c); continue; }
                 var excess = ledger.QueuedExcess(claim.Key, st.IsDisassembling);
                 // Runs before anything else is planned, so every action so far is an earlier claim's trim.
@@ -471,12 +511,9 @@ namespace IngameScript
             var a = actions[cursor];
             cursor++;
             if (a.Kind == CraftActionKind.AppendAssembly || a.Kind == CraftActionKind.AppendDisassembly)
-            {
-                a.Assembler.Append(a.Blueprint, a.Amount);
-                planner.Claim(a.Assembler, a.Item, a.Blueprint, a.Amount);
-            }
+                planner.Append(a.Assembler, a.Item, a.Blueprint, a.Amount);
             else if (a.Kind == CraftActionKind.Trim)
-                planner.Claim(a.Assembler, a.Item, a.Blueprint, -a.Assembler.Trim(a.Blueprint, a.Amount));
+                planner.Release(a.Assembler, a.Blueprint, a.Assembler.Trim(a.Blueprint, a.Amount));
             else if (a.Kind == CraftActionKind.ClearQueue)
                 a.Assembler.ClearQueue();
             else if (a.Kind == CraftActionKind.StopCooperating)

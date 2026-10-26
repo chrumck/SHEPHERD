@@ -40,8 +40,8 @@ whenever the server has it loaded, whether or not you're at it. Run both:
 2. Build a programmable block, open **Edit → Browse Scripts → SHEPHERD**, then **Check Code** and **OK**.
 3. Tag your containers (below). SHEPHERD starts itself — no timer block, no argument.
 4. Give it a minute or two to get going after any start: a compile, a server restart, or your grids loading when
-   you log in or arrive in a sector. A script's first runs are its slowest, so SHEPHERD spaces them out on purpose
-   to stay under the server's runtime limits.
+   you log in or arrive in a sector. A script's first runs are its slowest, so SHEPHERD gets them done early, spaced
+   out on purpose to stay under the server's runtime limits.
 
 ---
 
@@ -132,7 +132,7 @@ Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[S
    estimated sim speed, block counts and a per-tick-kind table — where you check server-legality.
    1. `U1 4% · U10 95% · U100 1%` — time spent at each speed. `U1` (every tick) while items queue up, after
       Check Code, during a bottle sweep and in learn mode; `U10` when caught up or slowed after a long run or
-      a sim dip; `U100` when holding back for the server, for a few seconds after a run over `spikeMs`, standing by or `HALTED`.
+      a sim dip, or for a few seconds after two runs over `spikeMs`; `U100` when holding back for a lagging server, standing by or `HALTED`.
    2. `THROTTLED · U10` in the header has two causes, counted apart: `thr xN P%` (a run over the per-run
       limit) and `wary xN P%` (the server's sim speed dipped).
    3. `over N` on each row counts every run over `peakMs`, including ones a garbage collection landed on
@@ -174,19 +174,20 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `utcOffsetHours` | `0` | −14 to 14 | Hours added to UTC for the clock and log stamps. |
 | `reactorFillPct` | `15` | 0–100 | How full SHEPHERD keeps reactor inputs, % of volume. `0` = don't feed. |
 | `gasGenFillPct` | `50` | 0–100 | Same for O2/H2 generators. |
-| `refineryFillPct` | `30` | 0–100 | Same for refineries. |
+| `refineryFillPct` | `30` | 0–100 | Same for refineries. `0` also stops refining for `A` quotas. |
 | `bottleSweepMinutes` | `3` | ≥ 0 | How often stored gas bottles are refilled through a gas tank. `0` = never. |
 | `sortPassSeconds` | `60` | ≥ 0 | Longest sort pass before a rescan refreshes plans and counts (~8 % throughput cost). `0` = no limit. |
 | `priority` | `0` | whole number | Which of several SHEPHERD blocks leads; higher wins. |
 | `factionShare` | `false` | | Also manage blocks other players shared with your faction. |
 | `dockedProduction` | `false` | | Also feed, harvest and queue a docked ship's refineries and assemblers (crafting only — never disassembly). |
 | `dockedFuel` | `false` | | Also top up a docked ship's reactors and generators (never empties them). |
-| `peakMs` | `0.8` | 0.001–1000 | A run longer than this backs SHEPHERD off; set it to your server's per-run limit. |
+| `peakMs` | `1.5` | 0.001–1000 | A run longer than this backs SHEPHERD off, its time divided by sim speed as the limiter counts it; set it to your server's per-run limit. |
 | `parkSim` | `0.75` | 0–0.99 | Park while sim speed keeps dropping below this. `0` = never park. |
 | `resumeSim` | `0.8` | up to 1 | Resume once average sim speed is back above this. Must be ≥ `parkSim`, or both revert. |
-| `backoffSim` | `0.9` | 0–1 | The `peakMs` back-off applies only below this sim speed. `1` = always, `0` = never. |
-| `spikeMs` | `5` | 0.001–1000 | A run longer than this pauses SHEPHERD's heavy work and screens for `spikeHoldSeconds`, at any sim speed. |
-| `spikeHoldSeconds` | `6` | ≥ 0 | How long that pause lasts, in game seconds. `0` = no pause. |
+| `backoffSim` | `1` | 0–1 | The `peakMs` back-off applies only below this sim speed. `1` = always, `0` = never. |
+| `spikeMs` | `8` | 0.001–1000 | A run longer than this is a spike. At any sim speed, a second spike within `spikeWindowSeconds` pauses SHEPHERD's heavy work and screens until the first is that old. |
+| `spikeWindowSeconds` | `10.5` | ≥ 0 | That window, in game seconds. `0` = no pause. |
+| `startupSeconds` | `45` | ≥ 0 | For this long after a start (real seconds), SHEPHERD bundles its slow first steps into fewer runs and skips the `peakMs` back-off. Keep it inside your server's startup allowance. `0` = off. |
 
 **Machines.** A machine below its target pulls fuel or ore ahead of storage, refilled once it has burnt a
 quarter of the target; a refinery on a shortage you set up is filled at once. Output is collected every
@@ -197,13 +198,19 @@ switch it back on yourself and it stays on.
 **Bottles.** A script can't read a bottle's fill, so every sweep refills them all, full or not — hence the
 long interval.
 
-**Server limits.** The defaults match Destiny's Advanced PB Limiter (0.8 ms per run, enforced below sim
-0.7). **Raising `peakMs` or lowering `parkSim`/`backoffSim` lets SHEPHERD run into the limiter's
-punishment** — change them only for a server with different limits or a test world. Destiny also punishes
-three runs over 10 ms within 10 s at any sim speed; a 6 s pause after every run over 5 ms keeps any 10 s to at most
-two such runs, so raise `spikeMs` or shorten `spikeHoldSeconds` with the same care. That rule applies from the
-first runs after a grid loads, which are the slow ones, so SHEPHERD's first cycle after a start takes a minute or two.
-A `spikeGraceSeconds` line left by v1.0.3–v1.0.4 now logs `unknown setting`; delete it.
+**Server limits.** The defaults are set for Destiny's Advanced PB Limiter: 1.5 ms per run at any sim speed, with
+each run's time divided by sim speed as the limiter does. **Raising `peakMs` or lowering `parkSim`/`backoffSim` lets
+SHEPHERD run into the limiter's punishment** — change them only for a server with different limits or a test world.
+A script's first runs after a start (a compile, a server restart, your grids loading) are always far over any
+per-run limit; the limiter forgives them for about a minute after a block's first run, so SHEPHERD gets them done
+in that time (`startupSeconds`, 45 s by default; a longer setting risks running past the allowance). Destiny also punishes three runs over 10 ms within 10 s at any sim speed, so SHEPHERD lets at most
+two runs over `spikeMs` into any `spikeWindowSeconds`; raise `spikeMs` or shorten `spikeWindowSeconds` with the
+same care.
+A `spikeGraceSeconds` line left by v1.0.3–v1.0.4 or a `spikeHoldSeconds` line left by v1.0.2–v1.0.10 now logs
+`unknown setting`; delete it. A `spikeMs=5` line left by those versions is safe but slows the first minute; `8` is
+the default now. **Upgrading from v1.0.5 or earlier, also delete `peakMs=0.8` and `backoffSim=0.9`:** they keep the
+old back-off, which does nothing at full sim speed, where Destiny's limiter now punishes too. `configReload` then
+writes the new defaults.
 
 **Mistakes are reported, never guessed.** An unknown key logs `unknown setting '<key>'`; a bad or
 out-of-range value logs `bad setting '<key>=<value>'` and keeps the default. `configReload` shows what was
@@ -212,8 +219,8 @@ read in the programmable block's detail pane (a toggle missing from the `priorit
 ```
 reloaded 2 pools, 14 quotas, 3 overrides, 0 facts
 priority 0, dockedProduction
-peakMs 0.8, parkSim 0.75, resumeSim 0.8, backoffSim 0.9
-spikeMs 5, spikeHoldSeconds 6
+peakMs 1.5, parkSim 0.75, resumeSim 0.8, backoffSim 1
+spikeMs 8, spikeWindowSeconds 10.5, startupSeconds 45
 fill % 15/50/30, bottles 3 min, pass 60 s, UTC+1
 ```
 
@@ -275,7 +282,8 @@ A trailing `A` lets SHEPHERD make the difference. Crafting needs an assembler ta
 
 1. Fuel and ore already loaded into reactors, generators and refineries are spoken for; everything else counts,
    assembler contents and machine output included. Since the count is grid-wide, a pool made only of `A` lines
-   needs no container: a `[Reserve:Quotas]` section of crafting targets works on its own.
+   needs no container: a `[Reserve:Quotas]` section of crafting targets works on its own. Quotas for the same
+   item in several pools add up: `100MA` in two pools makes 200.
 2. Ingots are refined, never disassembled (`500LA` on an ingot acts as `500L`). Ore can't be made. `AllA`
    is invalid.
 3. **Assembling adds to queues and never takes away your units** — SHEPHERD never clears or reorders queues.
@@ -452,7 +460,8 @@ nothing; commands other than `learn` still work). A docked ship hands over to th
 undocking. A block started while docked runs one scan before it stands by. Another player's SHEPHERD, or one beyond a `[SHEPHERD-Split]`, runs on its own.
 
 Who leads: highest `priority`, then station over ship, then large grid over small, then a fixed pick. A
-standing-by block takes over 10–15 s after the leader goes away. The log records each change (`standing by
+standing-by block takes over 10–15 s after the leader goes away, and within seconds of the leader showing `HALTED`
+(five failed steps in a row; a halted block keeps retrying and recovers by itself once a step succeeds). The log records each change (`standing by
 - <block> on <grid> leads`, `resuming - no higher-priority SHEPHERD`). A standing-by ship's `[SHEPHERD]`
 panel shows `standing by` and the leader's name.
 
@@ -526,14 +535,16 @@ SHEPHERD on the same grid** — load SHEPHERD into the old programmable block or
    Data is read only at startup and on `configReload`; SHEPHERD writes only its managed `[Categories]`,
    `[Production]`, `[Recipes]` and `[Yields]` sections, missing `[Settings]` keys and learned `[Reserve…]` lines,
    keeping your other lines and comments.
-2. **Weapons are left alone** — they pull their own ammo. A modded weapon built on a conveyor-sorter block
-   isn't recognised as one; tag it `[SHEPHERD-Off]`.
+2. **Weapons and parachute hatches are left alone** — they pull their own ammo and canvas. A modded weapon
+   built on a conveyor-sorter block isn't recognised as one; tag it `[SHEPHERD-Off]`.
 3. **Switched-off or broken machines get nothing**, and an off assembler's queue doesn't count, so its
    shortfall goes to another assembler taking orders — or, if it's the `Main`, waits
    (`craft X: Main assembler off`). A machine without power counts as on.
 4. **Grid changes are noticed within seconds** — a large chunk undocked, deleted or ground down triggers a
    rescan (`scope shrank 526 to 76 - rescanning`).
 5. Built and tested on the **Destiny Universe** server's mod set (WeaponCore and Defense Shields included).
+6. **Writing a plugin, mod or script that works alongside SHEPHERD?** [INTEGRATION.md](INTEGRATION.md) lists
+   what it may rely on: detection, the settings that switch jobs off, the status panel, tags and Custom Data.
 
 ---
 

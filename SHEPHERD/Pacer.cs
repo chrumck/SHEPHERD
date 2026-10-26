@@ -6,9 +6,9 @@ namespace IngameScript
     // moves — wake moderately, not rarely: idle runs cost ~nothing against the limiter's bars and sparse transfers
     // leave the average far below its bar, while a rare-wake idle made reacting to new work (a
     // ship docking mid-idle-cycle) take minutes, since a whole cycle must step through before the first move is
-    // even found. Recovering = a breach was just seen, so wake less often and fire no heavy call until the
-    // window passes. Parked = a safety hold (sim park, stand-down, open breaker, escalated back-off, spike
-    // hold) — wake rarely; minimal presence is the point.
+    // even found. Recovering = a breach was just seen, a spike hold or a stand-down runs, or the sim is wary:
+    // wake less often and fire no heavy call until it passes. Parked = a safety hold (sim park, open breaker,
+    // escalated back-off) — wake rarely; minimal presence is the point.
     public enum Cadence { Parked, Idle, Working, Recovering }
 
     // The one adaptive controller. A PB cannot read its own in-run time, so every decision is driven by the
@@ -16,8 +16,8 @@ namespace IngameScript
     // defenses over sim-time timers (never a tick count — sim-time tracks sim-speed, as the limiter does):
     //   * an adaptive refractory after each heavy (conveyor) call — spacing that grows with the measured cost,
     //     so a hot transfer self-paces and two heavies never land on consecutive ticks;
-    //   * a sim-speed park — the PRIMARY throttle: the limiter enforces its rules only while server sim is below
-    //     a threshold, and there it also charges each run divided by the sim ratio with no server-side deferral.
+    //   * a sim-speed park — the limiter charges each run divided by the sim ratio, with no server-side deferral,
+    //     so under sustained lag every run costs more and the one lever is to send fewer.
     //     A sample spans a few ticks of game time, never one: a single tick's wall interval is near the OS
     //     timer resolution, and one slow server tick at a healthy sim reads as deep lag, so per-tick samples
     //     faked dips most of the time. Three-stage on top, because sustained lag is what actually matters and a
@@ -29,26 +29,27 @@ namespace IngameScript
     //     Escalation stays fast when it matters: under genuine lag every sample window is a dip, so a full park
     //     lands in a fraction of a second, and only one refractory-spaced heavy can fire before stage two holds
     //     them;
-    //   * a proactive back-off on a breach while working — a run over the peak bar (whether WE fired it or an
-    //     external stall landed on a cheap tick) opens a short de-cluster window, and a second breach inside it
-    //     escalates to a park; sub-breach runs are left alone (they are never offenses). Armed only while the
-    //     sim is below its own bar, where the limiter may enforce: at a healthy sim it enforces nothing, and
-    //     the breaches there are mostly external stalls on cheap ticks, so backing off only cost throughput. A
-    //     bar of 1 arms it at any sim, for a limiter that enforces regardless of sim speed. Reducing exposure is
-    //     the only lever, since we can't stop the first breach (a tick late) or see GC to match the limiter's
-    //     GC-drop from the sandbox;
-    //   * a spike hold — a run far over the peak bar holds heavies and parks at ANY sim, so cold paths (the first
-    //     run of every method is slow, whether after a compile, a grid load or a resume from stand-by) can't land
-    //     close together where a server punishes a few long runs regardless of sim speed;
+    //   * a proactive back-off on a breach while working — a run the limiter would charge over the peak bar
+    //     (its ms divided by the sim ratio, as the limiter does; whether WE fired it or an external stall landed
+    //     on a cheap tick) opens a short de-cluster window, and a second breach inside it escalates to a park;
+    //     sub-breach runs are left alone (they are never offenses). Its own sim bar can confine it to lag, for a
+    //     limiter that enforces only there; at 1 it is armed at any sim. Reducing exposure is the only lever,
+    //     since we can't stop the first breach (a tick late) or see GC to match the limiter's GC-drop from the
+    //     sandbox;
+    //   * spike pacing — a run far over the peak bar is almost always a cold path (a method's first call compiles
+    //     it, so the first run of each path after a compile, a grid load or a resume from stand-by is slow, and no
+    //     split brings those under the peak bar). They have to be over before the limiter's per-block startup grace
+    //     ends, yet a server may punish a few long runs close together from the very first run. So spikes run as
+    //     fast as that rule allows: two may land back to back, and a second one inside the window parks at ANY sim
+    //     until the first has aged out of it;
     //   * dynamic cadence — fast only while a backlog drains, moderate otherwise, rare only under a safety park.
     public sealed class Pacer
     {
         // The server-matched bars: Destiny's limiter, unless [Settings] overrides them for another server.
-        public const double DefaultPeakMs = 0.8;    // the limiter's per-run peak bar — a run over this is an offense candidate
-        public const double DefaultParkSim = 0.75;  // margin above the limiter's 0.7 enforcement gate
+        public const double DefaultPeakMs = 1.5;    // the limiter's per-run peak bar — a run charged over this is an offense candidate
+        public const double DefaultParkSim = 0.75;
         public const double DefaultResumeSim = 0.8;
-        // Above the resume bar: a sim that is recovering, not yet healthy, still backs off. 1 = at any sim.
-        public const double DefaultBackoffSim = 0.9;
+        public const double DefaultBackoffSim = 1.0; // Destiny's limiter enforces at any sim speed
         const double BaseHoldSec = 0.15;     // min spacing after any heavy call (keeps heavies non-consecutive at Update1)
         const double HoldScalePerMs = 0.3;   // extra refractory per ms of the heavy call's measured cost
         // A short de-cluster pulse, deliberately far shorter than the limiter's 15 s offence grace: the limiter
@@ -59,8 +60,8 @@ namespace IngameScript
         double parkSim = DefaultParkSim;     // sim samples below this trigger the park stages; 0 = no sim park
         double resumeSim = DefaultResumeSim; // a full park resumes only once the sim AVERAGE clears this — sustained recovery, not one good sample
         double backoffSim = DefaultBackoffSim; // the breach back-off arms only while the sim is below this; 1 = at any sim
-        double spikeMs = DefaultSpikeMs;       // a run over this starts the spike hold
-        double spikeHoldSec = DefaultSpikeHoldSec; // its length; 0 = no hold
+        double spikeMs = DefaultSpikeMs;       // a run over this is a spike
+        double spikeWindowSec = DefaultSpikeWindowSec; // at most two spikes within this; 0 = no pacing
         // A tick whose game/wall ratio is below this was not slow, it was ABSENT: the game was paused, alt-tabbed,
         // or saving, so game time froze while the wall clock ran on. Such an interval carries no sim-speed
         // information at all — and taken as a measurement it reads as a ~50x-or-worse slowdown, which would
@@ -69,10 +70,10 @@ namespace IngameScript
         // so a freeze is caught at the same length whatever the window. A slowdown this deep is also a dead
         // server rather than one we could help by pacing.
         const double SimFloor = 0.02;
-        // Five Update1 ticks, set a hair under so the float sum of five lands on it. Long enough that one slow
-        // server tick no longer reads as a dip; short enough that real lag still parks within a fraction of a
-        // second. At Update10 and slower every tick spans more than this, so each tick is its own sample.
-        const double SimWindowSec = 0.08;
+        // Three Update1 ticks, set under their sum so tick-length jitter can't stretch a window to four. Long enough
+        // that one slow server tick no longer reads as a dip; short enough that real lag still parks within a
+        // fraction of a second. At Update10 and slower every tick spans more than this, so each tick is its own sample.
+        const double SimWindowSec = 0.045;
         const double SimAvgTauSec = 12.0;    // the average's time constant: resume takes roughly this long of healthy sim
         // Deliberately much shorter than the observed recurrence interval of isolated dips, so unrelated dips
         // never chain toward a park — only genuinely sustained lag (low samples fractions of a second apart)
@@ -81,11 +82,10 @@ namespace IngameScript
         const double SimWaryWindowSec = 5.0;
         public const int WaryDips = 2;       // dips within the window before heavies are held and the cadence slows
         public const int ParkDips = 3;       // dips within the window before the full park
-        // Destiny punishes 3 runs over 10 ms within 10 s at any sim speed, from the first runs after a grid loads. A
-        // hold longer than half that window lets at most two spikes into one, whatever caused them; the bar sits well
-        // above any steady-state run.
-        public const double DefaultSpikeMs = 5.0;
-        public const double DefaultSpikeHoldSec = 6.0;
+        // Destiny punishes 3 runs over 10 ms within 10 s at any sim speed, from the first runs after a grid loads.
+        // Both defaults keep a margin under that rule; the bar sits well above any steady-state run.
+        public const double DefaultSpikeMs = 8.0;
+        public const double DefaultSpikeWindowSec = 10.5;
         const double StandDownSec = 30.0;    // cooperative hold after a GracefulShutDown:: signal — let the offense window age out
         const double CrashHoldSec = 2.0;     // hold after a crashing step so it can never fast-loop
         const int MaxConsecutiveCrashes = 5; // this many crashes with no clean run between → open the breaker (park at idle)
@@ -94,6 +94,8 @@ namespace IngameScript
         double backoffSec;      // cadence back-off remaining (sim-time)
         double standDownSec;    // GracefulShutDown stand-down remaining (sim-time)
         double spikeSec;        // spike hold remaining (sim-time)
+        double clock;           // sim-time since construction, for the spike window
+        double lastSpikeAt = -1e9; // when the newest spike landed
         int windowBreaches;     // breaches recorded in the current back-off window; 1 → Recovering, 2+ → Parked (escalation)
         int consecutiveCrashes; // crashing steps since the last clean run; a run of them opens the breaker
         bool firedLastTick;     // a heavy fired last tick — its cost arrives as THIS tick's lastRunMs
@@ -102,6 +104,7 @@ namespace IngameScript
         int simDipCount;        // low sim samples counted within the current window — the escalation stage
         double windowGame;      // game time accumulated toward the next sim sample
         double windowWall;      // wall time over the same ticks
+        bool windowSpiked;      // one of our own spikes ran inside the current window
         // The resume signal, as a ratio of two EWMAs: game time and wall time smoothed SEPARATELY, then divided.
         // Averaging the per-sample ratios instead would be biased — the wall interval sits near the OS timer
         // resolution at the fast cadence, and quantization noise that cancels in a summed denominator does not
@@ -121,10 +124,10 @@ namespace IngameScript
             backoffSim = backoffBelowSim;
         }
 
-        public void SetSpike(double overMs, double holdSeconds)
+        public void SetSpike(double overMs, double windowSeconds)
         {
             spikeMs = overMs;
-            spikeHoldSec = holdSeconds;
+            spikeWindowSec = windowSeconds;
         }
 
         public bool SimParked => simParked;
@@ -136,7 +139,7 @@ namespace IngameScript
         public double SimAvg => simGameAvg / simWallAvg;
 
         // A spike hold is running: no heavy call and no panel render, which can be a cold path too.
-        public bool Cooling => spikeSec > 0.0;
+        public bool Quiet => spikeSec > 0.0;
 
         // Runs over the spike bar; each one is worth a log line.
         public int Spikes { get; private set; }
@@ -184,15 +187,26 @@ namespace IngameScript
             if (simWarySec <= 0.0) simDipCount = 0;
 
             // A dropped window (see SimFloor) must not move the average, must not count as a dip, and must not
-            // resume a park either. A clock running backwards is no measurement either.
+            // resume a park either. A clock running backwards is no measurement either. Nor is a window holding one
+            // of our own spikes: the previous run lies inside this interval, and a cold path's tens of ms stretch its
+            // wall time into a dip of our own making.
             var game = 0.0;
             var wall = 0.0;
-            if (wallSeconds < 0.0 || wallSeconds > 0.0 && dtSeconds / wallSeconds < SimFloor) windowGame = windowWall = 0.0;
+            if (lastRunMs > spikeMs) windowSpiked = true;
+            if (wallSeconds < 0.0 || wallSeconds > 0.0 && dtSeconds / wallSeconds < SimFloor)
+            {
+                windowGame = windowWall = 0.0;
+                windowSpiked = false;
+            }
             else if ((windowGame += dtSeconds) >= SimWindowSec)
             {
-                game = windowGame;
-                wall = windowWall + wallSeconds;
+                if (!windowSpiked)
+                {
+                    game = windowGame;
+                    wall = windowWall + wallSeconds;
+                }
                 windowGame = windowWall = 0.0;
+                windowSpiked = false;
             }
             else windowWall += wallSeconds;
             if (wall > 0.0)
@@ -219,21 +233,28 @@ namespace IngameScript
             }
 
             // A heavy WE fired last tick extends the refractory in proportion to its measured cost, so an
-            // expensive transfer self-paces (this only spaces the next heavy — it never shrinks the cadence).
-            if (firedLastTick) holdSec = Higher(holdSec, BaseHoldSec + lastRunMs * HoldScalePerMs);
+            // expensive transfer self-paces (this only spaces the next heavy — it never shrinks the cadence). Past
+            // the spike bar the cost is a cold path, not the network, and the spike pacing spaces it; scaling the
+            // refractory by it only pushed the next cold path past the limiter's startup grace.
+            if (firedLastTick) holdSec = Higher(holdSec, BaseHoldSec + (lastRunMs < spikeMs ? lastRunMs : spikeMs) * HoldScalePerMs);
             // A breach on a working tick arms the de-cluster back-off — whether WE fired the heavy or an external
             // stall landed on a cheap tick (indistinguishable from the sandbox). Sub-breach runs are left alone:
             // they are never offenses, so backing off on them only throws away throughput. Idle spikes are
             // excluded too — a pause while parked is noise, not deferrable work. Either sim reading below the
             // back-off bar counts: the newest sample sees a lag onset first, the average a recovery not yet
-            // complete. A bar of 1 is checked outright: an unclamped sample can read over 1 at full speed.
-            if (workPending && lastRunMs > breachMs
+            // complete. A bar of 1 is checked outright: an unclamped sample can read over 1 at full speed. The
+            // run is charged at the lower of the two readings, capped at full speed, as the limiter divides by sim.
+            var sim = simInstant < SimAvg ? simInstant : SimAvg;
+            if (workPending && lastRunMs > breachMs * (sim < 1.0 ? sim : 1.0)
                 && (backoffSim >= 1.0 || simInstant < backoffSim || SimAvg < backoffSim)) ArmBackoff();
 
+            clock += dtSeconds;
             if (lastRunMs > spikeMs)
             {
                 Spikes++;
-                spikeSec = spikeHoldSec;
+                // Two spikes inside the window: hold until the older is out of it, so a third can't join them.
+                if (clock - lastSpikeAt < spikeWindowSec) spikeSec = lastSpikeAt + spikeWindowSec - clock;
+                lastSpikeAt = clock;
             }
 
             firedLastTick = false;
@@ -256,7 +277,10 @@ namespace IngameScript
         // escalated back-off parks even when a backlog is draining.
         public Cadence NextCadence(bool backlog)
         {
-            if (standDownSec > 0.0 || spikeSec > 0.0 || Halted || simParked) return Cadence.Parked;
+            if (Halted || simParked) return Cadence.Parked;
+            // These holds only keep heavy calls back. Their cheap runs at U10 push a slow run out of the limiter's
+            // 50-run average within seconds; at U100 it stayed there over a minute and drew an average offense.
+            if (standDownSec > 0.0 || spikeSec > 0.0) return Cadence.Recovering;
             if (backoffSec > 0.0) return windowBreaches >= 2 ? Cadence.Parked : Cadence.Recovering;
             if (simDipCount >= WaryDips) return Cadence.Recovering;
             return backlog ? Cadence.Working : Cadence.Idle;

@@ -1193,6 +1193,35 @@ namespace SHEPHERD.Tests
         }
 
         [Fact]
+        public void BuildingUsesUpSHEPHERDsUnitsBeforeThePlayersQueuedBehindThem()
+        {
+            var main = new Assembler(1);
+            var rig = new Rig().Quota(Plate, "100A").Snapshot(main);
+            rig.Recount(30).Plan();
+            rig.Execute();
+            main.Enqueue(PlateBp, 500);                      // the player's order, queued after SHEPHERD's 70
+            rig.Recount(30).Plan();
+            main.Queue[0] = new QueueEntry(PlateBp, 10);     // 60 of SHEPHERD's built
+            rig.Recount(100).Plan();
+            Assert.Equal(10, TrimOf(rig.Planner).Amount);
+            rig.Execute();
+            Assert.Equal(500, main.Queue[0].Amount + main.Queue[1].Amount);
+        }
+
+        [Fact]
+        public void BuildingUsesUpThePlayersUnitsQueuedAheadFirst()
+        {
+            var main = new Assembler(1).Enqueue(PlateBp, 50);
+            var rig = new Rig().Quota(Plate, "100A").Snapshot(main);
+            rig.Recount(0).Plan();
+            rig.Execute();                                   // SHEPHERD's 50, behind the player's 50
+            main.Queue[0] = new QueueEntry(PlateBp, 10);     // 40 of the player's built
+            rig.Recount(100).Plan();
+            rig.Recount(100).Plan();
+            Assert.Equal(50, TrimOf(rig.Planner).Amount);
+        }
+
+        [Fact]
         public void AnOffAssemblersQueueIsNotTrimmed()
         {
             var main = new Assembler(1).Enqueue(PlateBp, 20);
@@ -1211,7 +1240,6 @@ namespace SHEPHERD.Tests
             var mine = new Assembler(7) { IsDisassembling = true }.Enqueue(PlateBp, 100);
             var rig = new Rig().Quota(Plate, "100LA").Snapshot(new Assembler(1)).Snapshot(mine);
             rig.Planner.TrackedDisassembler = 7;
-            rig.Planner.Claim(mine, Plate, PlateBp, 100);        // as the append that queued it would
             rig.Recount(150).Plan();
             Assert.Null(TrimOf(rig.Planner).Assembler);
             rig.Recount(150).Plan();

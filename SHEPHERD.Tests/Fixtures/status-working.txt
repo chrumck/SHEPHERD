@@ -1,0 +1,15 @@
+SHEPHERD 1.0.21 · working
+Base PB
+11:46:15
+0 Assemblers Controlled
+Ores           ████░░░░░░ 40%
+Ingots         ████░░░░░░ 40%
+Components     ──no route──
+Tools          ──no route──
+Ammo           ──no route──
+Consumables    ──no route──
+Others         ──no route──
+─────────────────────────
+Spare          ░░░░░░░░░░ 0%
+─────────────────────────
+craft Component/SteelPlate: no Main assembler

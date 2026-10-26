@@ -434,5 +434,15 @@ namespace SHEPHERD.Tests
             Assert.Equal("Cargo", scan.Managed[0].Block.CustomName);
             Assert.Empty(scan.Destinations);
         }
+
+        // A parachute hatch pulls its own canvas, so draining it would only ping-pong canvas through the conveyor.
+        [Fact]
+        public void ParachuteHatchesAreNeverManagedEvenWhenTagged()
+        {
+            var scan = Classify(Typed<IMyParachute>("Chute [SHEPHERD:Components]"), Block("Cargo", true));
+            Assert.Single(scan.Managed);
+            Assert.Equal("Cargo", scan.Managed[0].Block.CustomName);
+            Assert.Empty(scan.Destinations);
+        }
     }
 }

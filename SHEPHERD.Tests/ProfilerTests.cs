@@ -108,7 +108,7 @@ namespace SHEPHERD.Tests
         [Fact]
         public void TableReportsPerKindRunsMaxAvgAndPeakAndRollingAvg()
         {
-            var stats = new RunStats();
+            var stats = new RunStats { BarMs = 0.8 };
             stats.Record(0.20, RunKind.Transfer);
             stats.Record(0.60, RunKind.Transfer); // avg 0.40, max 0.60
             stats.Record(1.50, RunKind.Other);    // the all-tick peak

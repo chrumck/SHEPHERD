@@ -11,7 +11,9 @@ namespace SHEPHERD.Tests
         const double Tick = 1.0 / 60.0; // one Update1 tick of sim-time
         const double HealthySim = 1.0;  // comfortably above every sim threshold
         const double LaggedSim = 0.6;   // below the park bar — the limiter's enforcement window is near
-        const double Window = 5 * Tick; // one sim sample window: five Update1 ticks of game time
+        const int WindowTicks = 3;      // Update1 ticks per sim sample window
+        const double Window = WindowTicks * Tick;
+        const double Breach = Pacer.DefaultPeakMs + 0.1; // a run over the peak bar at full speed
 
         // The tests speak sim ratios; the Pacer takes the wall time the interval took.
         static void Observe(Pacer p, double ms, double dt, bool work, double sim) =>
@@ -79,9 +81,9 @@ namespace SHEPHERD.Tests
         public void BreachBackoffOutranksAnEmptyQueue()
         {
             var p = AnySim();
-            Observe(p, 1.0, Tick, true, HealthySim); // one breach → Recovering-level back-off
+            Observe(p, Breach, Tick, true, HealthySim); // one breach → Recovering-level back-off
             Assert.Equal(Cadence.Recovering, p.NextCadence(false));
-            Observe(p, 1.0, Tick, true, HealthySim); // second inside the window → the park wins
+            Observe(p, Breach, Tick, true, HealthySim); // second inside the window → the park wins
             Assert.Equal(Cadence.Parked, p.NextCadence(false));
         }
 
@@ -125,7 +127,7 @@ namespace SHEPHERD.Tests
         public void UnexpectedSpikeWhileWorkingRecoversAndBlocksHeavy()
         {
             var p = AnySim();
-            Observe(p, 0.9, Tick, true, HealthySim); // breach we did not cause → back off
+            Observe(p, Breach, Tick, true, HealthySim); // breach we did not cause → back off
             Assert.False(p.AllowHeavy);
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
         }
@@ -135,11 +137,11 @@ namespace SHEPHERD.Tests
         {
             var p = AnySim();
             Assert.Equal(0, p.Backoffs);
-            Observe(p, 0.9, Tick, true, HealthySim);  // fresh breach → one engagement
-            Observe(p, 0.9, Tick, true, HealthySim);  // still inside the back-off window → not a new engagement
+            Observe(p, Breach, Tick, true, HealthySim);  // fresh breach → one engagement
+            Observe(p, Breach, Tick, true, HealthySim);  // still inside the back-off window → not a new engagement
             Assert.Equal(1, p.Backoffs);
             Observe(p, 0.0, 10.0, true, HealthySim);  // age the back-off away
-            Observe(p, 0.9, Tick, true, HealthySim);  // a new breach after recovery → a second engagement
+            Observe(p, Breach, Tick, true, HealthySim);  // a new breach after recovery → a second engagement
             Assert.Equal(2, p.Backoffs);
             p.ResetCounters();
             Assert.Equal(0, p.Backoffs);
@@ -149,14 +151,14 @@ namespace SHEPHERD.Tests
         public void EscalationsCountSecondBreachesInsideAWindowOnly()
         {
             var p = AnySim();
-            Observe(p, 0.9, Tick, true, HealthySim);  // engages → Recovering, not an escalation
+            Observe(p, Breach, Tick, true, HealthySim);  // engages → Recovering, not an escalation
             Assert.Equal(0, p.Escalations);
-            Observe(p, 0.9, Tick, true, HealthySim);  // second breach inside the window → escalates to a park
+            Observe(p, Breach, Tick, true, HealthySim);  // second breach inside the window → escalates to a park
             Assert.Equal(1, p.Escalations);
-            Observe(p, 0.9, Tick, true, HealthySim);  // a third in the same window is not a new escalation
+            Observe(p, Breach, Tick, true, HealthySim);  // a third in the same window is not a new escalation
             Assert.Equal(1, p.Escalations);
             Observe(p, 0.0, 10.0, true, HealthySim);  // age the window away
-            Observe(p, 0.9, Tick, true, HealthySim);  // a fresh engagement alone never counts
+            Observe(p, Breach, Tick, true, HealthySim);  // a fresh engagement alone never counts
             Assert.Equal(1, p.Escalations);
             Assert.Equal(2, p.Backoffs);
             p.ResetCounters();
@@ -196,7 +198,7 @@ namespace SHEPHERD.Tests
             Assert.Equal(0.0, p.BackoffTime);
 
             var q = AnySim();
-            Observe(q, 0.9, Tick, true, HealthySim);  // a breach arms the back-off
+            Observe(q, Breach, Tick, true, HealthySim);  // a breach arms the back-off
             Observe(q, 0.0, 0.5, true, HealthySim);
             Assert.Equal(0.5, q.BackoffTime, 6);
             Assert.Equal(0.0, q.WaryTime);
@@ -213,89 +215,121 @@ namespace SHEPHERD.Tests
             Assert.Equal(Cadence.Idle, p.NextCadence(false));
         }
 
+        const double SpikeRun = Pacer.DefaultSpikeMs + 1.0;
+
         [Fact]
-        public void SpikeHoldsHeavyAndParksAtAHealthySimThenClears()
+        public void ALoneSpikeIsCountedButHoldsNothing()
         {
-            var p = new Pacer(); // default bars: a plain breach at a healthy sim arms nothing
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
-            Assert.True(p.Cooling);
+            // Cold paths must be over within the limiter's startup grace, so one spike alone costs no time. On an
+            // idle tick, so the breach back-off stays out of it.
+            var p = new Pacer();
+            Observe(p, SpikeRun, Tick, false, HealthySim);
+            Assert.Equal(1, p.Spikes);
+            Assert.False(p.Quiet);
+            Assert.True(p.AllowHeavy);
+            Assert.Equal(Cadence.Idle, p.NextCadence(false));
+        }
+
+        [Fact]
+        public void ASecondSpikeInsideTheWindowHoldsUntilTheFirstAgesOut()
+        {
+            var p = new Pacer();
+            Observe(p, SpikeRun, Tick, true, HealthySim);
+            Observe(p, SpikeRun, 1.0, true, HealthySim);      // the second spike, a second later
+            Assert.True(p.Quiet);
             Assert.True(p.Throttled);
             Assert.False(p.AllowHeavy);
-            Assert.Equal(Cadence.Parked, p.NextCadence(true));
-            Observe(p, 0.0, 60.0, true, HealthySim);
-            Assert.False(p.Cooling);
+            Assert.Equal(Cadence.Recovering, p.NextCadence(true));
+            Observe(p, 0.0, Pacer.DefaultSpikeWindowSec - 1.0 - 0.01, true, HealthySim);
+            Assert.True(p.Quiet);                             // the first spike is still inside the window
+            Observe(p, 0.0, 0.02, true, HealthySim);
+            Assert.False(p.Quiet);
             Assert.True(p.AllowHeavy);
-            Assert.Equal(Cadence.Working, p.NextCadence(true));
         }
 
         [Fact]
-        public void SpikeWhileIdleStillHolds()
+        public void SpikesFartherApartThanTheWindowNeverHold()
         {
             var p = new Pacer();
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, false, HealthySim); // a cold render on an idle tick counts too
-            Assert.True(p.Cooling);
-            Assert.Equal(Cadence.Parked, p.NextCadence(false));
+            for (var i = 0; i < 5; i++)
+            {
+                Observe(p, SpikeRun, Pacer.DefaultSpikeWindowSec, true, HealthySim);
+                Assert.False(p.Quiet);
+            }
+            Assert.Equal(5, p.Spikes);
         }
 
         [Fact]
-        public void SpikeHoldOutlastsHalfOfTenSeconds()
+        public void NeverThreeSpikesWithinTenSecondsEvenIfEveryAllowedRunSpikes()
         {
-            // Destiny punishes three runs over 10 ms within 10 s; spacing spikes by more than 5 s admits at most two.
+            // Destiny punishes three runs over 10 ms within 10 s at any sim speed, from the very first run. Worst
+            // case: every run the Pacer doesn't hold is a cold path, its cost seen a tick late.
             var p = new Pacer();
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
-            Observe(p, 0.0, 5.0, true, HealthySim);
-            Assert.True(p.Cooling);
-            Assert.False(p.AllowHeavy);
+            var spikes = new System.Collections.Generic.List<double>();
+            var now = 0.0;
+            var ms = 0.0;
+            for (var i = 0; i < 60 * 60; i++)
+            {
+                Observe(p, ms, Tick, true, HealthySim);
+                now += Tick;
+                ms = p.Quiet ? 0.01 : SpikeRun;
+                if (ms > Pacer.DefaultSpikeMs) spikes.Add(now);
+            }
+            Assert.True(spikes.Count >= 10, "pacing should let cold paths through, got " + spikes.Count);
+            for (var i = 2; i < spikes.Count; i++)
+                Assert.True(spikes[i] - spikes[i - 2] > 10.0, "three spikes within 10 s ending at " + spikes[i]);
         }
 
         [Fact]
-        public void BreachUnderTheSpikeBarDoesNotCool()
+        public void ASpikeWhileIdleCountsToo()
+        {
+            var p = new Pacer();
+            Observe(p, SpikeRun, Tick, false, HealthySim);   // a cold render on an idle tick counts too
+            Observe(p, SpikeRun, Tick, false, HealthySim);
+            Assert.True(p.Quiet);
+            Assert.Equal(Cadence.Recovering, p.NextCadence(false));
+        }
+
+        [Fact]
+        public void BreachUnderTheSpikeBarIsNoSpike()
         {
             var p = new Pacer();
             Observe(p, Pacer.DefaultSpikeMs - 1.0, Tick, true, HealthySim);
-            Assert.False(p.Cooling);
+            Observe(p, Pacer.DefaultSpikeMs - 1.0, Tick, true, HealthySim);
+            Assert.False(p.Quiet);
             Assert.Equal(0, p.Spikes);
         }
 
         [Fact]
-        public void EverySpikeIsCounted()
+        public void SpikeBarAndWindowAreSettable()
         {
             var p = new Pacer();
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim); // inside the hold: still worth its own log line
+            p.SetSpike(20.0, Pacer.DefaultSpikeWindowSec);
+            Observe(p, 15.0, Tick, false, HealthySim);  // over the default bar, under the configured one
+            Observe(p, 15.0, Tick, false, HealthySim);
+            Assert.False(p.Quiet);
+            Assert.Equal(0, p.Spikes);
+            p.SetSpike(Pacer.DefaultSpikeMs, 0.0);      // no pacing: spikes are still counted
+            Observe(p, SpikeRun, Tick, false, HealthySim);
+            Observe(p, SpikeRun, Tick, false, HealthySim);
+            Assert.False(p.Quiet);
+            Assert.True(p.AllowHeavy);
             Assert.Equal(2, p.Spikes);
         }
 
         [Fact]
-        public void SpikeBarAndHoldAreSettable()
+        public void ACostlierSpikeDoesNotLengthenTheRefractory()
         {
-            var p = new Pacer();
-            p.SetSpike(20.0, 6.0);
-            Observe(p, 15.0, Tick, true, HealthySim);   // over the default bar, under the configured one
-            Assert.False(p.Cooling);
-            p.SetSpike(Pacer.DefaultSpikeMs, 0.0); // no hold: the spike is still counted
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
-            Assert.False(p.Cooling);
-            Assert.True(p.AllowHeavy);
-            Assert.Equal(1, p.Spikes);
-        }
-
-        [Fact]
-        public void SpikeOnTheFirstRunHolds()
-        {
-            // Destiny punished the cold first cycle of grids loaded at login, so there is no startup grace.
-            var p = new Pacer();
-            Observe(p, Pacer.DefaultSpikeMs + 1.0, Tick, true, HealthySim);
-            Assert.True(p.Cooling);
-            Assert.False(p.AllowHeavy);
-            Assert.Equal(1, p.Spikes);
+            // Past the spike bar the cost is a cold path; the spike pacing spaces it, the refractory must not.
+            Assert.Equal(ObservationsToClearHeavy(Pacer.DefaultSpikeMs), ObservationsToClearHeavy(60.0));
+            Assert.True(ObservationsToClearHeavy(Pacer.DefaultSpikeMs) > ObservationsToClearHeavy(1.0));
         }
 
         [Fact]
         public void BackoffClearsAfterItsWindow()
         {
             var p = AnySim();
-            Observe(p, 0.9, Tick, true, HealthySim);
+            Observe(p, Breach, Tick, true, HealthySim);
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
             Observe(p, 0.0, 10.0, true, HealthySim); // ride out the back-off window
             Assert.True(p.AllowHeavy);
@@ -307,7 +341,7 @@ namespace SHEPHERD.Tests
         {
             var p = AnySim();
             p.NotifyHeavyFired();
-            Observe(p, 0.6, Tick, true, HealthySim);    // a hot cost UNDER the 0.8 breach bar, and one WE caused
+            Observe(p, 0.6, Tick, true, HealthySim);    // a hot cost UNDER the breach bar, and one WE caused
             Assert.False(p.AllowHeavy);                        // held...
             Assert.Equal(Cadence.Working, p.NextCadence(true)); // ...yet still fast: a sub-breach fired cost doesn't back off
         }
@@ -317,7 +351,7 @@ namespace SHEPHERD.Tests
         {
             var p = AnySim();
             p.NotifyHeavyFired();
-            Observe(p, 0.9, Tick, true, HealthySim);    // the heavy WE fired breached the 0.8 bar — back off regardless (B.5)
+            Observe(p, Breach, Tick, true, HealthySim);    // the heavy WE fired breached the bar — back off regardless (B.5)
             Assert.False(p.AllowHeavy);
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
         }
@@ -326,9 +360,9 @@ namespace SHEPHERD.Tests
         public void SecondBreachInsideWindowEscalatesToPark()
         {
             var p = AnySim();
-            Observe(p, 0.9, Tick, true, HealthySim);              // first breach → recovering
+            Observe(p, Breach, Tick, true, HealthySim);              // first breach → recovering
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
-            Observe(p, 0.9, Tick, true, HealthySim);              // second breach still inside the window → parked
+            Observe(p, Breach, Tick, true, HealthySim);              // second breach still inside the window → parked
             Assert.Equal(Cadence.Parked, p.NextCadence(true));
         }
 
@@ -336,7 +370,7 @@ namespace SHEPHERD.Tests
         public void SubBreachSpikesDoNotBackOff()
         {
             var p = AnySim();
-            Observe(p, 0.6, Tick, true, HealthySim);    // a sub-breach hot run (< 0.8) we did not cause
+            Observe(p, 0.6, Tick, true, HealthySim);    // a sub-breach hot run we did not cause
             Observe(p, 0.7, Tick, true, HealthySim);    // another, still under the bar
             Assert.True(p.AllowHeavy);                          // never held — sub-0.8 runs are not limiter offenses
             Assert.Equal(Cadence.Working, p.NextCadence(true)); // stays fast; only a breach (> 0.8) backs off
@@ -346,21 +380,21 @@ namespace SHEPHERD.Tests
         public void BreachAfterWindowClearsDoesNotEscalate()
         {
             var p = AnySim();
-            Observe(p, 0.9, Tick, true, HealthySim);    // first breach → recovering
+            Observe(p, Breach, Tick, true, HealthySim);    // first breach → recovering
             Observe(p, 0.0, 60.0, true, HealthySim);    // ride the whole window out — the escalation count resets with it
             Assert.True(p.AllowHeavy);
-            Observe(p, 0.9, Tick, true, HealthySim);    // a lone breach in a fresh window → recovering again, not idle
+            Observe(p, Breach, Tick, true, HealthySim);    // a lone breach in a fresh window → recovering again, not idle
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
         }
 
         [Fact]
-        public void StandDownHoldsHeavyAndParksHardThenClears()
+        public void StandDownHoldsHeavyAtU10ThenClears()
         {
             var p = new Pacer();
             p.StandDown();                                   // limiter's cooperative GracefulShutDown:: signal
             Observe(p, 0.0, Tick, true, HealthySim);
             Assert.False(p.AllowHeavy);                      // no heavy call while standing down
-            Assert.Equal(Cadence.Parked, p.NextCadence(true)); // parked at the SLOW cadence even with work pending
+            Assert.Equal(Cadence.Recovering, p.NextCadence(true)); // cheap runs at U10 even with work pending
             Observe(p, 0.0, 3600.0, true, HealthySim);        // a long gap ages the stand-down away
             Assert.True(p.AllowHeavy);
             Assert.Equal(Cadence.Working, p.NextCadence(true));
@@ -630,34 +664,71 @@ namespace SHEPHERD.Tests
             Assert.False(p.AllowHeavy);
         }
 
-        [Fact]
-        public void BreachAtAHealthySimDoesNotBackOff()
+        // A back-off confined to lag, for a limiter that enforces only there.
+        static Pacer GatedBelow(double backoffSim)
         {
             var p = new Pacer();
-            Observe(p, 0.9, Window, true, HealthySim);        // the limiter enforces nothing at this sim
+            p.SetBars(Pacer.DefaultPeakMs, Pacer.DefaultParkSim, Pacer.DefaultResumeSim, backoffSim);
+            return p;
+        }
+
+        [Fact]
+        public void ByDefaultABreachAtFullSpeedBacksOff()
+        {
+            var p = new Pacer();                              // Destiny's limiter enforces at any sim speed
+            Observe(p, Breach, Window, true, HealthySim);
+            Assert.Equal(1, p.Backoffs);
+            Assert.Equal(Cadence.Recovering, p.NextCadence(true));
+        }
+
+        [Fact]
+        public void UnderLagARunIsChargedDividedBySim()
+        {
+            // The limiter divides each run's ms by the sim ratio: a run under the bar at full speed is over it here.
+            var p = new Pacer();
+            Observe(p, Pacer.DefaultPeakMs * 0.8, Window, true, 0.7);
+            Assert.Equal(1, p.Backoffs);
+            var q = new Pacer();
+            Observe(q, Pacer.DefaultPeakMs * 0.8, Window, true, HealthySim);
+            Assert.Equal(0, q.Backoffs);
+        }
+
+        [Fact]
+        public void AFastSampleNeverShrinksTheCharge()
+        {
+            var p = new Pacer();
+            Observe(p, Pacer.DefaultPeakMs * 0.95, Window, true, 1.3);   // timer jitter over full speed
+            Assert.Equal(0, p.Backoffs);
+        }
+
+        [Fact]
+        public void ABreachAtAHealthySimDoesNotBackOffBelowAGatedBar()
+        {
+            var p = GatedBelow(0.9);
+            Observe(p, Breach, Window, true, HealthySim);
             Assert.True(p.AllowHeavy);
             Assert.Equal(0, p.Backoffs);
             Assert.Equal(Cadence.Working, p.NextCadence(true));
         }
 
         [Fact]
-        public void BreachBelowTheBackoffBarBacksOffEvenAboveTheResumeBar()
+        public void BreachBelowAGatedBarBacksOffEvenAboveTheResumeBar()
         {
-            var p = new Pacer();
-            Observe(p, 0.9, Window, true, 0.85);              // no dip and no park — only the back-off acts
+            var p = GatedBelow(0.9);
+            Observe(p, Breach, Window, true, 0.85);           // no dip and no park — only the back-off acts
             Assert.False(p.SimWary);
             Assert.Equal(1, p.Backoffs);
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
         }
 
         [Fact]
-        public void ALowSimAverageStillArmsTheBackoffOnAHealthySample()
+        public void ALowSimAverageStillArmsAGatedBackoffOnAHealthySample()
         {
-            var p = new Pacer();
+            var p = GatedBelow(0.9);
             for (var i = 0; i < 50; i++) Observe(p, 0.0, 1.0, true, 0.78);  // mild lag: no dip, yet the average sinks
-            Observe(p, 0.9, Window, true, HealthySim);        // a healthy newest sample, a not-yet-healthy average
+            Observe(p, Breach, Window, true, HealthySim);     // a healthy newest sample, a not-yet-healthy average
             Assert.Equal(HealthySim, p.SimInstant, 6);
-            Assert.True(p.SimAvg < Pacer.DefaultBackoffSim, "avg " + p.SimAvg);
+            Assert.True(p.SimAvg < 0.9, "avg " + p.SimAvg);
             Assert.Equal(1, p.Backoffs);
         }
 
@@ -665,7 +736,7 @@ namespace SHEPHERD.Tests
         public void ABackoffBarOfOneBacksOffAtAnySim()
         {
             var p = AnySim();
-            Observe(p, 0.9, Window, true, 1.05);              // timer jitter can read a full-speed sample over 1
+            Observe(p, Breach, Window, true, 1.05);           // timer jitter can read a full-speed sample over 1
             Assert.Equal(1, p.Backoffs);
             Assert.Equal(Cadence.Recovering, p.NextCadence(true));
         }
@@ -673,17 +744,18 @@ namespace SHEPHERD.Tests
         [Fact]
         public void ABackoffBarOfZeroNeverBacksOff()
         {
-            var p = new Pacer();
-            p.SetBars(Pacer.DefaultPeakMs, Pacer.DefaultParkSim, Pacer.DefaultResumeSim, 0.0);
-            Observe(p, 0.9, Window, true, LaggedSim);
+            var p = GatedBelow(0.0);
+            Observe(p, Breach, Window, true, LaggedSim);
             Assert.Equal(0, p.Backoffs);
         }
 
-        // Four healthy ticks and one that took 2.5 ticks of wall time — one slow server tick at a healthy sim.
+        // Healthy ticks and one that took ~1.8 ticks of wall time — one slow server tick at a healthy sim.
+        const double SlowTickSim = 0.55;
+
         static void WindowWithOneSlowTick(Pacer p)
         {
-            for (var i = 0; i < 4; i++) Observe(p, 0.0, Tick, true, HealthySim);
-            Observe(p, 0.0, Tick, true, 0.4);
+            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, HealthySim);
+            Observe(p, 0.0, Tick, true, SlowTickSim);
         }
 
         [Fact]
@@ -693,7 +765,7 @@ namespace SHEPHERD.Tests
             for (var i = 0; i < Pacer.ParkDips; i++) WindowWithOneSlowTick(p);
             Assert.False(p.SimWary);
             Assert.False(p.SimParked);
-            Assert.Equal(5.0 / 6.5, p.SimInstant, 6);
+            Assert.Equal(WindowTicks / (WindowTicks - 1 + 1 / SlowTickSim), p.SimInstant, 6);
             Assert.Equal(0, p.Waries);
         }
 
@@ -701,8 +773,8 @@ namespace SHEPHERD.Tests
         public void ASampleWaitsForAFullWindow()
         {
             var p = new Pacer();
-            for (var i = 0; i < 4; i++) Observe(p, 0.0, Tick, true, LaggedSim);
-            Assert.Equal(1.0, p.SimInstant, 6);              // four ticks are not a window yet
+            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            Assert.Equal(1.0, p.SimInstant, 6);              // one tick short is not a window yet
             Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(LaggedSim, p.SimInstant, 6);
         }
@@ -711,9 +783,9 @@ namespace SHEPHERD.Tests
         public void SustainedLagAtUpdate1GoesWaryThenParksWithinAFewWindows()
         {
             var p = new Pacer();
-            for (var i = 0; i < 5 * Pacer.WaryDips; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < WindowTicks * Pacer.WaryDips; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.True(p.SimWary);
-            for (var i = 0; i < 5 * (Pacer.ParkDips - Pacer.WaryDips); i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < WindowTicks * (Pacer.ParkDips - Pacer.WaryDips); i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.True(p.SimParked);
         }
 
@@ -734,11 +806,36 @@ namespace SHEPHERD.Tests
         public void APauseInsideAWindowDropsTheWholeWindow()
         {
             var p = new Pacer();
-            for (var i = 0; i < 4; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Observe(p, 0.0, Tick, true, PausedSim);         // the partial window goes with it
             Observe(p, 0.0, Tick, true, LaggedSim);
-            Assert.Equal(1.0, p.SimInstant, 6);              // carried over, these five ticks would have closed a window
-            for (var i = 0; i < 4; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            Assert.Equal(1.0, p.SimInstant, 6);              // carried over, these ticks would have closed a window
+            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            Assert.Equal(LaggedSim, p.SimInstant, 6);
+        }
+
+        [Fact]
+        public void AWindowHoldingOurOwnSpikeIsNoDip()
+        {
+            // A cold first run of tens of ms stretches the wall time of the window it lands in; at the server's
+            // real sim of 1.0 that reads as deep lag, but it is our own doing and says nothing about the server.
+            var p = new Pacer();
+            for (var i = 0; i < Pacer.ParkDips; i++) Observe(p, SpikeRun, Window, false, 0.4);
+            Assert.False(p.SimWary);
+            Assert.False(p.SimParked);
+            Assert.Equal(1.0, p.SimInstant, 6);
+            Assert.Equal(1.0, p.SimAvg, 6);
+            var q = new Pacer();                                 // the same windows without our spike are dips
+            for (var i = 0; i < Pacer.ParkDips; i++) Observe(q, 0.0, Window, false, 0.4);
+            Assert.True(q.SimParked);
+        }
+
+        [Fact]
+        public void AWindowAfterOurSpikeCountsAgain()
+        {
+            var p = new Pacer();
+            Observe(p, SpikeRun, Window, false, 0.4);            // dropped
+            Observe(p, 0.0, Window, false, LaggedSim);           // a real dip in the next window
             Assert.Equal(LaggedSim, p.SimInstant, 6);
         }
 
@@ -746,7 +843,7 @@ namespace SHEPHERD.Tests
         public void AClockRunningBackwardsDropsTheWindow()
         {
             var p = new Pacer();
-            for (var i = 0; i < 4; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             p.Observe(0.0, Tick, true, -1.0);
             Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(1.0, p.SimInstant, 6);

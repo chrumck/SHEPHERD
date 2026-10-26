@@ -109,6 +109,50 @@ namespace SHEPHERD.Tests
             Assert.True(PeerElection.Rank(0, false, true) > PeerElection.Rank(0, false, false));
         }
 
+        // The real script: a base PB leads over a lower-priority backup on the same grid until its crash breaker
+        // opens; then it advertises a halted rank and stands by, so the backup takes over the work.
+        [Fact]
+        public void AHaltedLeaderHandsOverToAHealthyPeer()
+        {
+            var station = ProgramHarness.Grid("Base", true, true);
+            var h = new ProgramHarness(station, "Base PB", "");
+            h.AddPeer("Backup PB", station, PeerElection.Rank(-1, true, true), 2002);
+            h.TickUntil(() => h.Echo.Contains(" running"));
+            h.Tick(300);
+            Assert.Contains(" running", h.Echo);
+            Assert.Equal(PeerElection.Rank(0, true, true), h.LastHeartbeat.Item1);
+
+            h.FailFetch = true;
+            h.TickUntil(() => h.Echo.Contains("standing by"));
+            Assert.Contains("Backup PB on Base leads", h.Echo);
+            Assert.Equal(PeerElection.Rank(0, true, true, true), h.LastHeartbeat.Item1);
+        }
+
+        // A docked ship's PB, outranked by the station's, runs one plan while warming up — the plan's slow first pass
+        // belongs inside the limiter's startup allowance, not at the undock that makes it lead — then stands by.
+        [Fact]
+        public void AnOutrankedPbPlansOnceWhileWarmingThenStandsBy()
+        {
+            var ship = ProgramHarness.Grid("Ship", false, false);
+            var station = ProgramHarness.Grid("Base", true, true);
+            var h = new ProgramHarness(ship, "Ship PB", "[Reserve:Spare]\nComponent/SteelPlate=100MA\n");
+            var log = h.AddPanel("Log [SHEPHERD-LOG]");
+            h.Dock(ship, station);
+            h.AddPeer("Base PB", station, PeerElection.Rank(0, true, true), 2002);
+            h.TickUntil(() => h.Echo.Contains("standing by"));
+            h.TickUntil(() => log.Count > 0 && log[log.Count - 1].Contains("craft Component/SteelPlate"));
+            h.Tick(300);
+            Assert.Contains("standing by", h.Echo);
+        }
+
+        [Fact]
+        public void AHaltedBlockRanksBelowEveryHealthyOne()
+        {
+            Assert.True(PeerElection.Rank(int.MaxValue, true, true, true) < PeerElection.Rank(int.MinValue, false, false));
+            // Among halted blocks the usual order still holds, so the pick stays the same on every PB.
+            Assert.True(PeerElection.Rank(1, false, false, true) > PeerElection.Rank(0, true, true, true));
+        }
+
         [Fact]
         public void TellsWhetherTheLeaderSharesOurConstruct()
         {

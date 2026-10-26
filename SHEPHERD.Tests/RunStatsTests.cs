@@ -101,7 +101,7 @@ namespace SHEPHERD.Tests
         [Fact]
         public void CountsRunsOverTheBarPerKind()
         {
-            var s = new RunStats();
+            var s = new RunStats { BarMs = 0.8 };
             s.Record(0.8, RunKind.Other);       // at the bar is not over it
             s.Record(0.81, RunKind.Other);
             s.Record(6.0, RunKind.Other);

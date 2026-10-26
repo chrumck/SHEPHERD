@@ -30,9 +30,10 @@ namespace IngameScript
         public bool LeaderOnOurConstruct { get; private set; }
 
         // Priority dominates; between equal priorities a station outranks a ship and a large grid a small one, which
-        // picks the base over a docked ship without any configuration.
-        public static long Rank(int priority, bool isStatic, bool isLarge) =>
-            priority * 4L + (isStatic ? 2 : 0) + (isLarge ? 1 : 0);
+        // picks the base over a docked ship without any configuration. A halted PB does no work, so it drops below
+        // every healthy one (priority × 4 stays within ±2^34) and a healthy peer takes over; alone, it still leads.
+        public static long Rank(int priority, bool isStatic, bool isLarge, bool halted = false) =>
+            priority * 4L + (isStatic ? 2 : 0) + (isLarge ? 1 : 0) - (halted ? 1L << 40 : 0);
 
         public static bool Outranks(long rank, long address, long otherRank, long otherAddress) =>
             rank > otherRank || rank == otherRank && address < otherAddress;

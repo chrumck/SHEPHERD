@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Sandbox.ModAPI.Ingame;
+using SpaceEngineers.Game.ModAPI.Ingame;
 using VRage;
 using VRage.Game.ModAPI.Ingame;
 
@@ -344,9 +345,9 @@ namespace IngameScript
             var inv = block.GetInventory(0);
             if (inv == null) return;
 
-            // A gun pulls its own ammo through the conveyor, so draining it only ping-pongs the ammo back and forth
-            // at a transfer each way.
-            if (block is IMyUserControllableGun) return;
+            // A gun pulls its own ammo and a parachute hatch its canvas through the conveyor, so draining either only
+            // ping-pongs the item back and forth at a transfer each way.
+            if (block is IMyUserControllableGun || block is IMyParachute) return;
 
             // A gas tank is a bottle refill station, not drain-storage: its inventory holds bottles being
             // maintained, so it is captured here and NOT added to Managed (never drained by the sort).

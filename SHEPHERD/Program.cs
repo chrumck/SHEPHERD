@@ -33,7 +33,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.5";
+        const string ScriptVersion = "1.0.21";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -57,6 +57,11 @@ namespace IngameScript
         // A routine back-off is logged only after this long without one: on a large conveyor network transfers sit
         // just over the peak bar every few seconds, and logging each pushed every other message out of the log.
         const double BackoffLogQuietSeconds = 60.0;
+        const double StartupLogSeconds = 180.0;    // how long after a start every run over the peak bar is logged
+        const double PackMs = 50.0;                // a start's packed run stops taking more steps past this
+        // How long a start packs its runs and skips the breach back-off: well inside the limiter's per-PB startup
+        // allowance (about a minute from a block's first run), so the cold first calls land in it.
+        const double DefaultStartupSeconds = 45.0;
 
         // Moves in one cycle that make it a backlog worth the fast cadence. Below this the moves are a trickle (a
         // running base's harvests and refills) that the idle cadence keeps up with; even at the heaviest measured
@@ -72,7 +77,7 @@ namespace IngameScript
         // The Advanced PB Limiter passes this argument (::-1 peak, ::-2 average) right before it would punish us.
         const string GracefulShutDownArg = "GracefulShutDown::";
 
-        const int LogCapacity = 20;
+        const int LogCapacity = 30;
 
         // Every SHEPHERD PB advertises and listens on this tag, across connectors because a PB manages its docked
         // grids too; a receiver narrows that to the PBs that would manage the same blocks (StandingBy).
@@ -101,7 +106,8 @@ namespace IngameScript
         const string ResumeSimKey = "resumeSim";
         const string BackoffSimKey = "backoffSim";
         const string SpikeMsKey = "spikeMs";
-        const string SpikeHoldKey = "spikeHoldSeconds";
+        const string SpikeWindowKey = "spikeWindowSeconds";
+        const string StartupKey = "startupSeconds";
         const string UtcOffsetKey = "utcOffsetHours";
         const string ReactorFillKey = "reactorFillPct";
         const string GasGenFillKey = "gasGenFillPct";
@@ -165,7 +171,7 @@ namespace IngameScript
         bool dockedProduction;           // [Settings]: also manage docked refineries and assemblers
         bool dockedFuel;                 // [Settings]: also top up docked reactors and gas generators
         // [Settings]: the limiter bars the Pacer throttles against, kept here for the configReload readback.
-        double peakMs, parkSim, resumeSim, backoffSim, spikeMs, spikeHoldSeconds;
+        double peakMs, parkSim, resumeSim, backoffSim, spikeMs, spikeWindowSeconds, startupSeconds;
         // [Settings]: hours added to UTC for the clock (display only); how full to keep each machine kind's input,
         // as a percent of its max volume (0 = don't feed that kind); minutes between bottle sweeps (0 = none).
         double utcOffsetHours, reactorFillPct, gasGenFillPct, refineryFillPct, bottleSweepMinutes;
@@ -208,9 +214,13 @@ namespace IngameScript
         RunKind lastTickKind;      // what last tick did → THIS tick's LastRunTimeMs is that kind's cost (one tick late)
         int lastBackoffs;          // last-seen Pacer.Backoffs → a fresh breach back-off engaged
         int lastEscalations;       // last-seen Pacer.Escalations → a back-off escalated to a park
-        int lastSpikes;            // last-seen Pacer.Spikes → a spike hold engaged
+        int lastSpikes;            // last-seen Pacer.Spikes → a run over the spike bar
         double lastBackoffSec = -BackoffLogQuietSeconds;
         DateTime lastRunWallClock = DateTime.UtcNow; // wall-clock of the previous run → the sim-speed estimate's denominator
+        readonly DateTime startedAt = DateTime.UtcNow;
+        DateTime runStart;
+        bool starting;             // this run is within startupSeconds of the start
+        bool panelsDrawn;          // every panel of a finished scan has drawn once
         double gameSeconds;                          // lifetime game-time clock for the yield sample's pace deltas
         int scopeBlocks;
         double lastScopeProbeSec;
@@ -321,7 +331,8 @@ namespace IngameScript
             learnJob = new PhaseJob(LearnStep, StepResult.Classified);
             leadListener = IGC.RegisterBroadcastListener(LeadChannel);
 
-            // Start eager so a freshly compiled PB sorts promptly; the loop settles to idle after one clean pass.
+            // Start eager: the cold first runs must be over within the limiter's startup grace, and a fresh start
+            // sorts promptly. The loop settles to idle after one clean pass.
             activelyWorking = backlog = true;
             Runtime.UpdateFrequency = UpdateFrequency.Update1;
             BuildEcho(null);
@@ -382,6 +393,8 @@ namespace IngameScript
             var lastRunMs = Runtime.LastRunTimeMs;
             var dt = Runtime.TimeSinceLastRun.TotalSeconds; // game time: under lag it under-runs the wall clock
             var now = DateTime.UtcNow;                      // by the sim ratio the limiter divides each run's ms by
+            runStart = now;
+            starting = (now - startedAt).TotalSeconds < startupSeconds;
             var wall = (now - lastRunWallClock).TotalSeconds;
             lastRunWallClock = now;
             var prevKind = lastTickKind;            // the run whose ms may arm a back-off in Observe below
@@ -392,7 +405,9 @@ namespace IngameScript
             secsSinceBottleSweep += dt;
             lastTickKind = RunKind.Other;           // default; overridden below if this tick scans or transfers
 
-            pacer.Observe(lastRunMs, dt, activelyWorking, wall);
+            // The limiter checks nothing in its startup allowance, so a start's slow runs arm no back-off: it would
+            // only hold back the next cold path.
+            pacer.Observe(lastRunMs, dt, activelyWorking && !starting, wall);
             if (pacer.SimParked != simParkLogged)
             {
                 simParkLogged = pacer.SimParked;
@@ -403,33 +418,55 @@ namespace IngameScript
             if (StandingBy() && warmedUp)
             {
                 Echo(echoText);
-                if (!election.LeaderOnOurConstruct && !pacer.Cooling) RenderStandingBy();
+                if (!election.LeaderOnOurConstruct && !pacer.Quiet) RenderStandingBy();
                 ApplyCadence(Cadence.Parked);
+                LogPacing(prevKind, lastRunMs, now);
                 return;
             }
             var observed = DoTickWork();
 
             // Render only on a plain cheap tick — a heavy tick must do nothing but its call to keep headroom for a
             // GC pause, and the plan and save ticks stay alone so their profiler rows measure only themselves. The
-            // cheap ticks render plenty.
+            // cheap ticks render plenty. Until every panel has drawn once, though, each first render is a slow run
+            // of its own, so they all ride whatever run has room, heavy or not.
             // A warming PB leaves the panels to a leader on its own construct.
-            if (lastTickKind == RunKind.Other && !observed && !pacer.Cooling && (leader == null || !election.LeaderOnOurConstruct)) RenderTick();
+            if (!observed && !pacer.Quiet && (leader == null || !election.LeaderOnOurConstruct)
+                && (lastTickKind == RunKind.Other || starting && !panelsDrawn && Room()))
+            {
+                Echo(echoText);
+                var first = renderCursor;
+                do RenderTick(); while (starting && !panelsDrawn && renderCursor != first && Room());
+                if (renderCursor == first && destinations != null) panelsDrawn = true;
+            }
 
             ApplyCadence(pacer.NextCadence(backlog));
+            LogPacing(prevKind, lastRunMs, now);
+        }
 
-            // History only, never the status panel: throttling is common and expected (mostly external GC stalls the
-            // limiter drops), so it stays out of the health word too, and the full count is thr xN on the profiler.
-            // Logged: an escalation to a park, and the first back-off after a quiet spell — a steady stream of
-            // routine ones would bury every other message. prevKind + lastRunMs name the run that armed it
-            // (ArmBackoff runs only in Observe off lastRunMs).
+        // History only, never the status panel: throttling is common and expected (mostly external GC stalls the
+        // limiter drops), so it stays out of the health word too, and the full count is thr xN on the profiler.
+        // Logged: an escalation to a park, and the first back-off after a quiet spell — a steady stream of routine
+        // ones would bury every other message. prevKind + lastRunMs name the run that armed it (ArmBackoff runs only
+        // in Observe off lastRunMs). Every tick calls it, standing by too, so the counters never lag the runs.
+        // Wall time since the start, as the limiter's startup allowance counts it: a run over the peak bar in the
+        // first minutes says whether the cold runs finished inside that allowance, and which one did not.
+        void LogPacing(RunKind prevKind, double lastRunMs, DateTime now)
+        {
             var engaged = pacer.Backoffs > lastBackoffs;
-            if (pacer.Escalations > lastEscalations || pacer.Spikes > lastSpikes || engaged && gameSeconds - lastBackoffSec >= BackoffLogQuietSeconds)
-                Log("throttling " + CadenceLabel() + " (" + Profiler.Tag(prevKind) + " " + lastRunMs.ToString("0.000") + "ms)");
+            var throttled = pacer.Escalations > lastEscalations || pacer.Spikes > lastSpikes || engaged && gameSeconds - lastBackoffSec >= BackoffLogQuietSeconds;
+            var sinceStart = (now - startedAt).TotalSeconds;
+            if (throttled || lastRunMs > peakMs && sinceStart < StartupLogSeconds)
+                Log((throttled ? "throttling " + CadenceLabel() + " (" : "slow (") + Profiler.Tag(prevKind) + " "
+                    + lastRunMs.ToString("0.000") + "ms) +" + sinceStart.ToString("0") + "s");
             if (engaged) lastBackoffSec = gameSeconds;
             lastBackoffs = pacer.Backoffs;
             lastEscalations = pacer.Escalations;
             lastSpikes = pacer.Spikes;
         }
+
+        // Room in this run for another step or render while the start packs them: a stall the server can absorb,
+        // and far from the instruction cap, which aborts a script outright.
+        bool Room() => (DateTime.UtcNow - runStart).TotalMilliseconds < PackMs && Runtime.CurrentInstructionCount < Runtime.MaxInstructionCount / 10;
 
         // True when a blueprint observation took the tick, which then renders nothing either.
         bool DoTickWork()
@@ -465,70 +502,79 @@ namespace IngameScript
                 }
                 if (!driver.HasWork) StartCycle();
 
-                var pass = driver.Current as SortJob;
-                if (pass != null && sortPassSeconds > 0.0 && gameSeconds - sortPassStartSec >= sortPassSeconds) pass.Stop();
-                var r = driver.Step();
-                if (driver.LastCompleted is CraftJob) blueprintProbe.ProbeExecuted();
-                if (driver.LastCompleted == ledgerJob) warmedUp = true;
-                // A bottle sweep keeps the fast cadence for its whole duration whatever each tick did, but never
-                // bumps movesThisCycle — a sweep is maintenance, so EndCycle's active/idle decision stays driven
-                // by the sort's own moves.
-                var bottleTick = driver.Current is BottleJob || driver.LastCompleted is BottleJob;
-                if (bottleTick) activelyWorking = backlog = true;
+                StepResult r;
+                do
+                {
+                    var pass = driver.Current as SortJob;
+                    if (pass != null && sortPassSeconds > 0.0 && gameSeconds - sortPassStartSec >= sortPassSeconds) pass.Stop();
+                    r = driver.Step();
+                    if (driver.LastCompleted is CraftJob) blueprintProbe.ProbeExecuted();
+                    if (driver.LastCompleted == planJob) warmedUp = true;
+                    // A bottle sweep keeps the fast cadence for its whole duration whatever each tick did, but never
+                    // bumps movesThisCycle — a sweep is maintenance, so EndCycle's active/idle decision stays driven
+                    // by the sort's own moves.
+                    var bottleTick = driver.Current is BottleJob || driver.LastCompleted is BottleJob;
+                    if (bottleTick) activelyWorking = backlog = true;
 
-                if (r == StepResult.Fetched)
-                {
-                    lastTickKind = RunKind.Fetch;
-                    pacer.NotifyHeavyFired();
-                }
-                else if (r == StepResult.Classified)
-                {
-                    // A classify batch, or a build step (an allocation burst over a slice of the managed blocks):
-                    // armed like a heavy call so the GC-risk window lands on a cheap tick and no two batches (nor
-                    // a batch and the first transfer) fire back-to-back.
-                    lastTickKind = driver.Current == buildJob || driver.LastCompleted == buildJob ? RunKind.Build : RunKind.Scan;
-                    pacer.NotifyHeavyFired();
-                }
-                else if (r == StepResult.Moved)
-                {
-                    if (!bottleTick)
+                    if (r == StepResult.Fetched)
                     {
-                        activelyWorking = true;
-                        // Mid-cycle too, so a dock unload speeds up at once rather than a whole slow cycle later.
-                        if (++movesThisCycle >= BacklogMoves) backlog = true;
+                        lastTickKind = RunKind.Fetch;
+                        pacer.NotifyHeavyFired();
                     }
-                    lastTickKind = RunKind.Transfer;
-                    pacer.NotifyHeavyFired();
-                }
-                else if (r == StepResult.Stalled)
-                {
-                    // The conveyor call fired but moved nothing — a dead target. It cost a transfer, so attribute
-                    // it and arm the refractory like a Moved, but it is NOT progress, so leave movesThisCycle/
-                    // activelyWorking alone — a stall-only cycle parks at idle and re-probes the dead target
-                    // slowly rather than hammering it at the fast cadence.
-                    lastTickKind = RunKind.Transfer;
-                    pacer.NotifyHeavyFired();
-                }
-                else if (r == StepResult.Planned)
-                {
-                    // Usually cheap, but a tick where a discovery operation changes state can cost several ms.
-                    lastTickKind = RunKind.Plan;
-                    pacer.NotifyHeavyFired();
-                }
-                else if (r == StepResult.Found && !bottleTick)
-                {
-                    // A transfer is queued for the next tick. Stay active but do NOT arm the refractory — find and
-                    // its commit run back-to-back; only the commit is heavy.
-                    activelyWorking = true;
-                }
+                    else if (r == StepResult.Classified)
+                    {
+                        // A classify batch, or a build step (an allocation burst over a slice of the managed blocks):
+                        // armed like a heavy call so the GC-risk window lands on a cheap tick and no two batches (nor
+                        // a batch and the first transfer) fire back-to-back.
+                        lastTickKind = driver.Current == buildJob || driver.LastCompleted == buildJob ? RunKind.Build : RunKind.Scan;
+                        pacer.NotifyHeavyFired();
+                    }
+                    else if (r == StepResult.Moved)
+                    {
+                        if (!bottleTick)
+                        {
+                            activelyWorking = true;
+                            // Mid-cycle too, so a dock unload speeds up at once rather than a whole slow cycle later.
+                            if (++movesThisCycle >= BacklogMoves) backlog = true;
+                        }
+                        lastTickKind = RunKind.Transfer;
+                        pacer.NotifyHeavyFired();
+                    }
+                    else if (r == StepResult.Stalled)
+                    {
+                        // The conveyor call fired but moved nothing — a dead target. It cost a transfer, so attribute
+                        // it and arm the refractory like a Moved, but it is NOT progress, so leave movesThisCycle/
+                        // activelyWorking alone — a stall-only cycle parks at idle and re-probes the dead target
+                        // slowly rather than hammering it at the fast cadence.
+                        lastTickKind = RunKind.Transfer;
+                        pacer.NotifyHeavyFired();
+                    }
+                    else if (r == StepResult.Planned)
+                    {
+                        // Usually cheap, but a tick where a discovery operation changes state can cost several ms.
+                        lastTickKind = RunKind.Plan;
+                        pacer.NotifyHeavyFired();
+                    }
+                    else if (r == StepResult.Found && !bottleTick)
+                    {
+                        // A transfer is queued for the next tick. Stay active but do NOT arm the refractory — find and
+                        // its commit run back-to-back; only the commit is heavy.
+                        activelyWorking = true;
+                    }
 
-                var sort = driver.LastCompleted as SortJob;
-                if (sort != null) FinishSort(sort);
-                var bottles = driver.LastCompleted as BottleJob;
-                if (bottles != null) FinishBottles(bottles);
-                // The cycle ends when the queue drains, whichever job happened to be last — a completion handler
-                // that enqueues a follow-up (bottles) keeps the cycle open by construction.
-                if (driver.LastCompleted != null && !driver.HasWork) EndCycle();
+                    var sort = driver.LastCompleted as SortJob;
+                    if (sort != null) FinishSort(sort);
+                    var bottles = driver.LastCompleted as BottleJob;
+                    if (bottles != null) FinishBottles(bottles);
+                    // The cycle ends when the queue drains, whichever job happened to be last — a completion handler
+                    // that enqueues a follow-up (bottles) keeps the cycle open by construction.
+                    if (driver.LastCompleted != null && !driver.HasWork) EndCycle();
+                }
+                // A method compiles on its first call, so after a start every phase's first step is slow wherever it
+                // lands. Several share a run then: fewer runs over the spike bar, all inside the limiter's startup
+                // allowance. Never past a step that moved items or found a stack to move — one transfer per run.
+                while (starting && driver.HasWork && r != StepResult.Found && r != StepResult.Moved
+                    && r != StepResult.Stalled && r != StepResult.Refilled && Room());
 
                 pacer.NotifyCleanRun();
             }
@@ -688,8 +734,8 @@ namespace IngameScript
         }
 
         // The election runs ahead of the tick's own heavy gate, so its scans take the gate themselves: a cold first
-        // scan inside a spike hold, or sharing a run with the first fetch, is the third run over 10 ms that Destiny
-        // punishes. A skipped scan waits for an allowed tick; until then the PB does no work to lead with anyway.
+        // scan inside a spike hold, or sharing a run with the first fetch, can be the third run over 10 ms that
+        // Destiny punishes. A skipped scan waits for an allowed tick; until then the PB does no work to lead with anyway.
         void ScanScopeAsHeavy()
         {
             if (!pacer.AllowHeavy) return;
@@ -777,6 +823,15 @@ namespace IngameScript
             PlanBlueprint();
             PlanYield();
             production.Compose(craftPlanner, refinePlanner, discovery, blueprintProbe, yieldSample, markCheck);
+            // Outranked and warming up: the plan ran for its cold start alone. It queues and writes nothing, and its
+            // discovery claims go, so a later resume plans afresh.
+            if (leader != null)
+            {
+                discovery.Reset();
+                blueprintProbe.Reset();
+                yieldSample.Reset();
+                return true;
+            }
             PersistTrackedDisassembler();
             cycleRouting.Forget();
             if (craftPlanner.Actions.Count > 0)
@@ -961,8 +1016,9 @@ namespace IngameScript
                 ledgerJob.Rearm(sortSources, ledgerKinds, countPools, assemblerStates);
                 stockStale = true;
                 driver.Enqueue(ledgerJob);
-                // A warming PB that is outranked must not plan: the plan already claims assemblers.
-                if (leader == null)
+                // An outranked PB plans only while warming up, to run the plan's first, slowest pass inside the
+                // limiter's startup allowance; the plan leaves its work to the leader (PlanPhase).
+                if (leader == null || !warmedUp)
                 {
                     planJob.Rearm();
                     driver.Enqueue(planJob);   // the plan tick enqueues the craft actions (if any) and then the sort
@@ -1070,7 +1126,7 @@ namespace IngameScript
         {
             pacer.StandDown();
             ResetWork();
-            ApplyCadence(Cadence.Parked);
+            ApplyCadence(pacer.NextCadence(false));
             Log("standing down (" + argument + ")");
         }
 
@@ -1080,7 +1136,7 @@ namespace IngameScript
         bool StandingBy()
         {
             var grid = Me.CubeGrid;
-            var rank = PeerElection.Rank(leadPriority, grid.IsStatic, grid.GridSizeEnum == MyCubeSize.Large);
+            var rank = PeerElection.Rank(leadPriority, grid.IsStatic, grid.GridSizeEnum == MyCubeSize.Large, pacer.Halted);
             // Before the first fetch the scope is empty and would drop every peer heard, so a PB compiled while docked
             // would lead the whole docked group until the next heartbeat.
             if (scope.Count == 0) ScanScopeAsHeavy();
@@ -1212,9 +1268,10 @@ namespace IngameScript
             resumeSim = Pacer.DefaultResumeSim;
             backoffSim = Pacer.DefaultBackoffSim;
             spikeMs = Pacer.DefaultSpikeMs;
-            spikeHoldSeconds = Pacer.DefaultSpikeHoldSec;
+            spikeWindowSeconds = Pacer.DefaultSpikeWindowSec;
+            startupSeconds = DefaultStartupSeconds;
             pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
-            pacer.SetSpike(spikeMs, spikeHoldSeconds);
+            pacer.SetSpike(spikeMs, spikeWindowSeconds);
             utcOffsetHours = 0;
             reactorFillPct = 15;
             gasGenFillPct = 50;
@@ -1300,7 +1357,8 @@ namespace IngameScript
                 else if (key == ResumeSimKey) ok = InRange(val, 0.0, 1.0, ref resumeSim);
                 else if (key == BackoffSimKey) ok = InRange(val, 0.0, 1.0, ref backoffSim);
                 else if (key == SpikeMsKey) ok = InRange(val, 0.001, 1000.0, ref spikeMs);
-                else if (key == SpikeHoldKey) ok = InRange(val, 0.0, 1e6, ref spikeHoldSeconds);
+                else if (key == SpikeWindowKey) ok = InRange(val, 0.0, 1e6, ref spikeWindowSeconds);
+                else if (key == StartupKey) ok = InRange(val, 0.0, 1e6, ref startupSeconds);
                 else if (key == UtcOffsetKey) ok = InRange(val, -14.0, 14.0, ref utcOffsetHours);
                 else if (key == ReactorFillKey) ok = InRange(val, 0.0, 100.0, ref reactorFillPct);
                 else if (key == GasGenFillKey) ok = InRange(val, 0.0, 100.0, ref gasGenFillPct);
@@ -1318,7 +1376,7 @@ namespace IngameScript
                 resumeSim = Pacer.DefaultResumeSim;
             }
             pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
-            pacer.SetSpike(spikeMs, spikeHoldSeconds);
+            pacer.SetSpike(spikeMs, spikeWindowSeconds);
             // Only asks: this document is discarded, and the write rides the save tick like every other flush.
             SettingsEntries();
             if (store.AddMissing(SettingsSection, settingsEntries)) fillSettings = flushPending = true;
@@ -1354,7 +1412,7 @@ namespace IngameScript
                  // Said outright, since a setting that didn't take shows only as behaviour that didn't change.
                  + "\npriority " + leadPriority + (factionShare ? ", factionShare" : "") + (dockedProduction ? ", dockedProduction" : "") + (dockedFuel ? ", dockedFuel" : "")
                  + "\npeakMs " + peakMs + ", parkSim " + parkSim + ", resumeSim " + resumeSim + ", backoffSim " + backoffSim
-                 + "\nspikeMs " + spikeMs + ", spikeHoldSeconds " + spikeHoldSeconds
+                 + "\nspikeMs " + spikeMs + ", spikeWindowSeconds " + spikeWindowSeconds + ", startupSeconds " + startupSeconds
                  + "\nfill % " + reactorFillPct + "/" + gasGenFillPct + "/" + refineryFillPct
                  + ", bottles " + bottleSweepMinutes + " min, pass " + sortPassSeconds + " s, UTC" + (utcOffsetHours < 0 ? "" : "+") + utcOffsetHours;
         }
@@ -1378,7 +1436,10 @@ namespace IngameScript
             string error;
             if (!doc.TryParse(Me.CustomData, out error)) { Log("can't save config: " + error); return; }
             var store = new ConfigStore(doc, CategoriesSection, ProductionSection, RecipesSection, YieldsSection);
-            store.MergeSection(CategoriesSection, categoryOverrides.Entries);
+            var learned = learnCommit;
+            // The override map changes only on leaving learn mode; rewriting it at any other flush would delete lines
+            // added since the last reload — a hand edit, or another program's — before configReload could read them.
+            if (learned) store.MergeSection(CategoriesSection, categoryOverrides.Entries);
             productionEntries.Clear();
             if (persistedDisassembler != 0)
                 productionEntries.Add(new KeyValuePair<string, string>(DisassemblerKey, persistedDisassembler.ToString()));
@@ -1388,7 +1449,6 @@ namespace IngameScript
             productionFacts.YieldEntries(productionEntries);
             store.MergeSection(YieldsSection, productionEntries);
             // The signature covers only the managed sections, so learned reserve lines force the write.
-            var learned = learnCommit;
             if (learned) foreach (var line in learner.QuotaLines) store.SetItem(line.Section, line.Key, line.Value);
             learnCommit = false;
             SettingsEntries();
@@ -1420,7 +1480,8 @@ namespace IngameScript
             Setting(ResumeSimKey, resumeSim);
             Setting(BackoffSimKey, backoffSim);
             Setting(SpikeMsKey, spikeMs);
-            Setting(SpikeHoldKey, spikeHoldSeconds);
+            Setting(SpikeWindowKey, spikeWindowSeconds);
+            Setting(StartupKey, startupSeconds);
         }
 
         // bool.ToString() is "False"; the guide and the parser's examples use lower case.
@@ -1461,14 +1522,12 @@ namespace IngameScript
             }
         }
 
-        // One cheap tick's rendering. The Echo pane is re-emitted every tick (SE clears it each run) — but only
-        // the STABLE welcome banner, never the live profiler/log (those change every run and flash unreadably at
-        // Update1; their home is the LCDs). At most ONE LCD panel is written per tick, rotating status→debug→log→each
-        // levels LCD→each stock LCD.
+        // One LCD panel's rendering, rotating status→debug→log→each levels LCD→each stock LCD. Its caller re-emits the
+        // Echo pane once per run (SE clears it each run, and every Echo in a run appends) — only the STABLE welcome
+        // banner, never the live profiler/log (those change every run and flash unreadably at Update1; their home is
+        // the LCDs).
         void RenderTick()
         {
-            Echo(echoText);
-
             var levels = 3 + (reserveLcds?.Count ?? 0);
             var panels = levels + (stockLcds?.Count ?? 0);
             if (renderCursor >= panels) renderCursor = 0; // the scan dropped an LCD since the last render
@@ -1545,10 +1604,10 @@ namespace IngameScript
         string DebugState() =>
             leader != null ? "standing by" : pacer.Halted ? "HALTED" : learnMode ? "learning" : pacer.Throttled ? "THROTTLED" : activelyWorking ? "working" : "idle";
 
-        // The wake rate currently in effect. Paired with the state word: THROTTLED U10 = a breach back-off or the
-        // sim park's wary stage (the thr/wary shares tell which), THROTTLED U100 = a full park (a second breach
-        // inside the window, the sim park, a stand-down), working U10 = a trickle, working U1 = a backlog, idle U10 =
-        // caught up.
+        // The wake rate currently in effect. Paired with the state word: THROTTLED U10 = a breach back-off, the sim
+        // park's wary stage (the thr/wary shares tell which), a spike hold or a stand-down; THROTTLED U100 = a full
+        // park (a second breach inside the window, the sim park); working U10 = a trickle, working U1 = a backlog,
+        // idle U10 = caught up.
         string CadenceLabel()
         {
             var f = Runtime.UpdateFrequency;
