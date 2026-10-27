@@ -214,13 +214,13 @@ namespace SHEPHERD.Tests
         }
 
         [Fact]
-        public void ExcessZeroForMinAndNoQuota()
+        public void ExcessCountsAMinSurplusButNothingWithoutAQuota()
         {
             var pool = new ReservePool("P");
             pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Min, 100));
             pool.SetCount("Ingot/Iron", 300);
-            Assert.Equal(0, pool.Excess("Ingot/Iron"));   // Min never removes
-            Assert.Equal(0, pool.Excess("Ingot/Gold"));   // no quota
+            Assert.Equal(200, pool.Excess("Ingot/Iron"));   // where it may go is the source's call
+            Assert.Equal(0, pool.Excess("Ingot/Gold"));
         }
 
         [Fact]

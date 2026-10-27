@@ -39,12 +39,26 @@ namespace SHEPHERD.Tests
             Assert.Equal(Lines(
                 "Foo · 96%",              // (340 + 1200) / (500 + 1000 + 100); All carries no target
                 "Component",
-                " SteelPlate  340/500M",
-                " Motor       0/100LA",
+                " SteelPlate  340/500M    68%",
+                " Motor       0/100LA      0%",
                 "Ingot",
-                " Iron        1200/1000",  // same subtype as the ore, kept apart by its type header
+                " Iron        1200/1000  120%",  // same subtype as the ore, kept apart by its type header
                 "Ore",
-                " Iron        12.3k/All"), Render(pool));
+                " Iron        12.3k/All"), Render(pool));  // All has no amount to measure against
+        }
+
+        [Fact]
+        public void AZeroQuotaShowsNoPercentage()
+        {
+            var pool = new ReservePool("Foo");
+            pool.SetQuota("Component/SteelPlate", Q("0"));
+            pool.Containers = 1;
+            pool.TookIn("Component/SteelPlate", 5);
+
+            Assert.Equal(Lines(
+                "Foo · all",
+                "Component",
+                " SteelPlate  5/0"), Render(pool));
         }
 
         [Fact]

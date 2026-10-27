@@ -159,6 +159,7 @@ namespace IngameScript
     {
         static readonly List<string> keys = new List<string>();
         static readonly List<double> amounts = new List<double>();
+        static readonly List<string> levels = new List<string>();
 
         public static void Render(StringBuilder sb, ReservePool pool)
         {
@@ -197,7 +198,17 @@ namespace IngameScript
         static void Lines(StringBuilder sb, ReservePool quotas)
         {
             var width = 0;
-            foreach (var key in keys) if (Name(key).Length > width) width = Name(key).Length;
+            var levelWidth = 0;
+            levels.Clear();
+            for (var i = 0; i < keys.Count; i++)
+            {
+                if (Name(keys[i]).Length > width) width = Name(keys[i]).Length;
+                Quota q;
+                var level = Amount(amounts[i]);
+                if (quotas != null && quotas.TryGetQuota(keys[i], out q)) level += "/" + q.Format();
+                levels.Add(level);
+                if (level.Length > levelWidth) levelWidth = level.Length;
+            }
 
             // Quadratic in the pool's line count, which a user sizes by hand — tens of lines, on a cheap tick.
             for (var i = 0; i < keys.Count; i++)
@@ -209,9 +220,11 @@ namespace IngameScript
                 {
                     if (!SameType(keys[i], keys[j])) continue;
                     var key = keys[j];
-                    sb.Append(' ').Append(Name(key).PadRight(width)).Append("  ").Append(Amount(amounts[j]));
+                    sb.Append(' ').Append(Name(key).PadRight(width)).Append("  ").Append(levels[j]);
                     Quota q;
-                    if (quotas != null && quotas.TryGetQuota(key, out q)) sb.Append('/').Append(q.Format());
+                    // All has no amount to measure against, and a 0 target none to divide by.
+                    if (quotas != null && quotas.TryGetQuota(key, out q) && q.Mode != QuotaMode.All && q.Target > 0)
+                        sb.Append(' ', levelWidth - levels[j].Length).Append(((int)(amounts[j] / q.Target * 100.0 + 0.5) + "%").PadLeft(6));
                     sb.AppendLine();
                 }
             }

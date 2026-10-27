@@ -33,7 +33,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.22";
+        const string ScriptVersion = "1.0.29";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -58,6 +58,7 @@ namespace IngameScript
         // just over the peak bar every few seconds, and logging each pushed every other message out of the log.
         const double BackoffLogQuietSeconds = 60.0;
         const double StartupLogSeconds = 180.0;    // how long after a start every run over the peak bar is logged
+        const double RunGapLogSeconds = 5.0;       // 3x the slowest cadence's gap
         const double PackMs = 50.0;                // a start's packed run stops taking more steps past this
         // How long a start packs its runs and skips the breach back-off: well inside the limiter's per-PB startup
         // allowance (about a minute from a block's first run), so the cold first calls land in it.
@@ -397,6 +398,9 @@ namespace IngameScript
             starting = (now - startedAt).TotalSeconds < startupSeconds;
             var wall = (now - lastRunWallClock).TotalSeconds;
             lastRunWallClock = now;
+            // Game time only passes between runs while the world ticks, so a long gap means the server left this PB
+            // unrun: one way a peer's heartbeats go missing after a server restart.
+            if (dt > RunGapLogSeconds && gameSeconds > 0.0) Log("no run for " + dt.ToString("0.0") + " s (wall " + wall.ToString("0.0") + " s)");
             var prevKind = lastTickKind;            // the run whose ms may arm a back-off in Observe below
             stats.Record(lastRunMs, prevKind);
             var f = Runtime.UpdateFrequency;        // the interval just elapsed ran at the rate set last tick
@@ -586,7 +590,8 @@ namespace IngameScript
         }
 
         // Open a fresh cycle: the pooled phase jobs re-arm and queue up. The build's last step enqueues the ledger and
-        // the plan, the plan enqueues the SortJob, and FinishSort queues the bottle sweep when one is armed.
+        // the plan, the plan enqueues the SortJob, and FinishSort queues the bottle sweep when one is armed (a start's
+        // plan queues it ahead of the sort).
         void StartCycle()
         {
             fetchJob.Rearm();
@@ -840,6 +845,9 @@ namespace IngameScript
                 driver.Enqueue(craftJob);
                 activelyWorking = true;
             }
+            // The sweep's first runs are cold paths too, and behind a long first sort pass (a backlog after downtime)
+            // they landed past the limiter's startup allowance.
+            if (starting && bottleTanks != null) QueueBottleSweep();
             driver.Enqueue(new SortJob(sortSources, cycleRouting, ExamineBudget, sortStart, lapNoRoute, lapUnreachable));
             sortPassStartSec = gameSeconds;
             return true;
@@ -1080,12 +1088,14 @@ namespace IngameScript
                 unreachableStates.Commit();
                 ResetLap();
             }
-            if (bottleTanks != null && bottleTanks.Count > 0)
-            {
-                driver.Enqueue(new BottleJob(sortSources, bottleTanks, ExamineBudget));
-                activelyWorking = true;
-                Log("refilling bottles (" + bottleTanks.Count + " tank" + (bottleTanks.Count == 1 ? "" : "s") + ")");
-            }
+            if (bottleTanks != null && bottleTanks.Count > 0) QueueBottleSweep();
+        }
+
+        void QueueBottleSweep()
+        {
+            driver.Enqueue(new BottleJob(sortSources, bottleTanks, ExamineBudget));
+            activelyWorking = true;
+            Log("refilling bottles (" + bottleTanks.Count + " tank" + (bottleTanks.Count == 1 ? "" : "s") + ")");
         }
 
         // The sweep is done: surface any stranded tanks, restart the sweep interval.
@@ -1094,6 +1104,8 @@ namespace IngameScript
             LogBottleStranded(job.StrandedTanks);
             bottleTanks = null;
             secsSinceBottleSweep = 0.0;
+            // A start's sweep runs ahead of the sort, so the sort pass's time cap starts when the sweep ends.
+            sortPassStartSec = gameSeconds;
         }
 
         // Log a refill tank the first time the Drain pass can't return its bottles to storage; cleared once a

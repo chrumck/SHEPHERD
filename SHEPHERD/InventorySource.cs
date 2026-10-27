@@ -63,9 +63,9 @@ namespace IngameScript
         // net — SE input constraints reject foreign items on every insertion path, so a present item is almost
         // always kept; it only bites if a mod/game update drops a previously-valid type from the constraint.
         // A KeepQuota reserve drains a quota item only when it is over target (the over-target excess routes out,
-        // capped source-side in Prepare) and drains a non-quota item fully to its category home; a quota item
-        // at/under target — and every Min/All item — is kept. A ToDemand stack is drainable; SortJob restricts
-        // where it may go (DemandOnly).
+        // capped source-side in Prepare; a Min surplus only to another pool, CanPlaceAt) and drains a non-quota item
+        // fully to its category home; a quota item at/under target — and every All item — is kept. A ToDemand stack
+        // is drainable; SortJob restricts where it may go (DemandOnly).
         public bool ShouldDrain(int index)
         {
             if (mode == DrainMode.KeepAll) return false;
@@ -90,18 +90,28 @@ namespace IngameScript
         // Ask the target itself whether it will take one unit right now. Deliberately "room for ≥1 unit", not the
         // whole stack, so a near-full higher-priority container still qualifies — Commit tops it off with what
         // fits and the remainder spills to the next target. Cheap and network-free; reachability isn't checked.
-        public bool CanPlaceAt(int index, ICategoryAcceptor target) => target.Accepts(buffer[index].Type);
+        // A Min quota promises the player the stock stays on reserve duty, so its surplus may top up another pool's
+        // shortfall but never go back to storage or into a machine. A refill tank only borrows a bottle.
+        public bool CanPlaceAt(int index, ICategoryAcceptor target)
+        {
+            Quota q;
+            if (!(target is ReserveIntake || target is RefillStation) && pool != null && pool.TryGetQuota(KeyAt(index), out q) && q.Mode == QuotaMode.Min) return false;
+            return target.Accepts(buffer[index].Type);
+        }
 
         // Runs on the cheap find tick and captures the item by VALUE (its id travels in the struct), not an
         // index — so Commit can move by id on the next tick. The move amount is the tighter of the target's cap
         // (a MachineFeed / reserve intake stopping ON its fill target) and this source's cap (a KeepQuota reserve
-        // shedding only its over-target excess).
+        // shedding only its over-target excess). A refill tank's lift skips the source cap and leaves the pool count
+        // alone: the sweep returns the bottles to this inventory before any other job runs, so capping it to the
+        // excess left a reserve's bottles at or under target never refilled.
         public void Prepare(int index, ICategoryAcceptor target)
         {
             pendingItem = buffer[index];
             pendingTarget = target.Inventory;
             pendingAcceptor = target;
-            pendingAmount = ClaimExcess(pendingItem, target.ClaimTransferAmount(pendingItem));
+            var amount = target.ClaimTransferAmount(pendingItem);
+            pendingAmount = target is RefillStation ? amount : ClaimExcess(pendingItem, amount);
             // A machine consumes its input queue front-first and greedy top-ups merge into the front stack, so a
             // demand delivery landing behind one would never be processed while its in-flight cover suppresses
             // re-requesting. Delivering a constrained feed's ore at slot 0 closes that live-lock inside the one

@@ -147,8 +147,8 @@ tag). One line per item:
 2. **Value:** `<amount>`, `<amount>M` or `<amount>L`, each optionally followed by `A`; or `All`. Letters are
    case-insensitive; the amount is a plain non-negative number. `AllA`, a reordered or repeated letter, a negative or
    anything else is logged as `bad quota` and ignored.
-   1. `<amount>` keeps exactly that many in the pool. `M` keeps at least that many (never removes). `L` pulls up to
-      that many and removes any above, like a plain amount.
+   1. `<amount>` keeps exactly that many in the pool. `M` keeps at least that many; its surplus leaves only to fill
+      another pool's shortfall of the item. `L` pulls up to that many and removes any above, like a plain amount.
    2. `A` lets SHEPHERD **produce** toward the amount: craft it, or for an ingot, refine it. With `A`, a plain amount
       also disassembles surplus above it, and `L` disassembles surplus but never crafts. `M` with `A` crafts but never
       disassembles. `A` does nothing on ore, nor with `L` on an ingot (ingots are never disassembled); both show a

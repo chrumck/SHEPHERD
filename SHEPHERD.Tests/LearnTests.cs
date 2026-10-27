@@ -200,11 +200,25 @@ namespace SHEPHERD.Tests
         {
             Pool("", "Component/SteelPlate", "500MA");
             Pool("", "Component/Girder", "100L");
-            learner.TeachReserve("", "Component/SteelPlate", 800);
-            learner.TeachReserve("", "Component/Girder", 40);
+            learner.TeachReserve("", "Component/SteelPlate", 300);
+            learner.TeachReserve("", "Component/Girder", 140);
             Finish();
-            Assert.Equal(new[] { "learn Reserve Component/Girder=40L", "learn Reserve Component/SteelPlate=800MA" },
+            Assert.Equal(new[] { "learn Reserve Component/Girder=140L", "learn Reserve Component/SteelPlate=300MA" },
                 learner.Lines);
+        }
+
+        [Fact]
+        public void AnAmountTheLineAlreadyAllowsTeachesNothing()
+        {
+            Pool("", "Component/SteelPlate", "500MA");
+            Pool("", "Component/Girder", "100L");
+            Pool("", "Component/Motor", "50");
+            learner.TeachReserve("", "Component/SteelPlate", 800);   // above an M floor
+            learner.TeachReserve("", "Component/Girder", 40);        // below an L ceiling
+            learner.TeachReserve("", "Component/Motor", 80);
+            Finish();
+            Assert.Equal(new[] { "learn Reserve Component/Motor=80" }, learner.Lines);
+            Assert.Single(learner.QuotaLines);
         }
 
         [Fact]

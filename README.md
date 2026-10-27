@@ -127,7 +127,8 @@ Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[S
    ```
 2. **`[SHEPHERD-LOG]` — history.** The same lines timestamped, except the "doing it" ones, each logged once when it appears, plus
    events (started, learned a recipe, stood down, bad config line). A few diagnostics are log-only, such as
-   a category with no container (the status panel already shows `──no route──`).
+   a category with no container (the status panel already shows `──no route──`), and `no run for 12.3 s (wall
+   12.5 s)` when the server left the block unrun for over 5 s of game time.
 3. **`[SHEPHERD-DEBUG]` — run times.** Peak and rolling-average run time against the server's limits,
    estimated sim speed, block counts and a per-tick-kind table — where you check server-legality.
    1. `U1 4% · U10 95% · U100 1%` — time spent at each speed. `U1` (every tick) while items queue up, after
@@ -138,13 +139,13 @@ Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[S
    3. `over N` on each row counts every run over `peakMs`, including ones a garbage collection landed on
       (which the limiter ignores), so it reads higher than the limiter's own count.
 4. **`[SHEPHERD-RESERVE:Name]` / `[SHEPHERD-RESERVE]` — reserve levels.** One pool per screen: each item
-   with what the pool holds and its quota; the header % is held ÷ quota over the numbered quotas (`All` lines
-   aren't counted). Amounts from 10,000 are shortened to `k` (`2000k`, never `M`, which is the Min letter). A
+   with what the pool holds, its quota and the held ÷ quota %; the header % is the same over all the numbered
+   quotas together (`All` lines have no amount, so no %). Amounts from 10,000 are shortened to `k` (`2000k`, never `M`, which is the Min letter). A
    pool with no quotas lists its contents instead — see **Find the exact keys**.
    ```
    Ammo · 68%
    AmmoMagazine
-    NATO_5p56x45mm  340/500M
+    NATO_5p56x45mm  340/500M    68%
    Ore
     Iron            12.3k/All
    ```
@@ -195,8 +196,8 @@ quarter of the target; a refinery on a shortage you set up is filled at once. Ou
 base machine it feeds and never turns it back on. On a kind set to `0` or a block tagged `[SHEPHERD-Off]`,
 switch it back on yourself and it stays on.
 
-**Bottles.** A script can't read a bottle's fill, so every sweep refills them all, full or not — hence the
-long interval.
+**Bottles.** A script can't read a bottle's fill, so every sweep refills them all, full or not, reserve
+containers included — hence the long interval.
 
 **Server limits.** The defaults are set for Destiny's Advanced PB Limiter: 1.5 ms per run at any sim speed, with
 each run's time divided by sim speed as the limiter does. **Raising `peakMs` or lowering `parkSim`/`backoffSim` lets
@@ -261,11 +262,12 @@ Ore/Stone=5000L
 | Amount | Mode | Pulls in | Trims |
 |---|---|---|---|
 | `500` | Exact | up to 500 | above 500 |
-| `500M` | Min | up to 500 | never |
+| `500M` | Min | up to 500 | never (the surplus can top up another pool) |
 | `500L` | Limit | up to 500 | above 500 |
 | `All` | All | everything | never |
 
-`L` moves like a plain amount; it differs only with `A` (below). Letters are case-insensitive; the item key is not. Fractions use `.` (`12.5`). A malformed line is skipped
+`L` moves like a plain amount; it differs only with `A` (below). Pools quoting the same item share it: when one is
+short, another's surplus above its own amount moves over. An `M` surplus goes only there, never back to storage. Letters are case-insensitive; the item key is not. Fractions use `.` (`12.5`). A malformed line is skipped
 and logged. Add `docked=true` to a ship's pool so its missing containers aren't flagged on the status panel
 while the ship is away (the log still notes them). **Two pools can't both `All` the same item** — only one fills, and the status panel warns.
 
@@ -390,7 +392,8 @@ Rules:
    several-category container is skipped with a log note. Reserve containers teach loadouts on docked ships too.
 2. An item found in two categories is a conflict and isn't saved — move all of it to one place.
 3. A new reserve item gets a plain line (`=2000`, exact); an existing line keeps its `M`/`L`/`A` letters;
-   `All` lines are left alone. A pool taught only from docked ships gets `docked=true`.
+   `All` lines are left alone. An amount the line already allows changes nothing: more than an `M` amount, or
+   less than an `L` one. A pool taught only from docked ships gets `docked=true`.
 4. Nothing is removed for being missing — delete lines by hand.
 5. Nothing is saved until the second `learn`; a recompile discards the preview (your items stay where they
    are).

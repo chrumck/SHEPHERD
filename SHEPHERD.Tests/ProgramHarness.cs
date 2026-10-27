@@ -29,6 +29,7 @@ namespace SHEPHERD.Tests
         readonly List<Action<double>> beforeTick = new List<Action<double>>();
         long nextId = 100;
         double gameSeconds;
+        double pausedSeconds;
 
         public const long Owner = 7;
         public readonly IMyCubeGrid Home;
@@ -62,7 +63,7 @@ namespace SHEPHERD.Tests
             runtime.SetupGet(r => r.LastRunTimeMs).Returns(() => RunMs);
             runtime.SetupGet(r => r.MaxInstructionCount).Returns(50000);
             runtime.SetupGet(r => r.CurrentInstructionCount).Returns(() => Instructions);
-            runtime.SetupGet(r => r.TimeSinceLastRun).Returns(() => TimeSpan.FromSeconds(WakeSeconds()));
+            runtime.SetupGet(r => r.TimeSinceLastRun).Returns(() => TimeSpan.FromSeconds(WakeSeconds() + pausedSeconds));
 
             terminal.Setup(t => t.GetBlocksOfType<IMyTerminalBlock>(It.IsAny<List<IMyTerminalBlock>>(), It.IsAny<Func<IMyTerminalBlock, bool>>()))
                 .Callback<List<IMyTerminalBlock>, Func<IMyTerminalBlock, bool>>((list, collect) =>
@@ -144,6 +145,35 @@ namespace SHEPHERD.Tests
             Add(cargo.Object);
         }
 
+        // An untagged cargo container holding `items`, which nothing ever moves out.
+        public void AddStock(string name, params MyInventoryItem[] items)
+        {
+            var inventory = new Mock<IMyInventory>();
+            inventory.SetupGet(i => i.MaxVolume).Returns((MyFixedPoint)10);
+            inventory.Setup(i => i.GetItems(It.IsAny<List<MyInventoryItem>>(), It.IsAny<Func<MyInventoryItem, bool>>()))
+                .Callback<List<MyInventoryItem>, Func<MyInventoryItem, bool>>((list, keep) => list.AddRange(items));
+            var cargo = new Mock<IMyCargoContainer>();
+            Place(cargo, name, null);
+            cargo.SetupGet(c => c.HasInventory).Returns(true);
+            cargo.SetupGet(c => c.InventoryCount).Returns(1);
+            cargo.Setup(c => c.GetInventory(It.IsAny<int>())).Returns(inventory.Object);
+            cargo.Setup(c => c.GetInventory()).Returns(inventory.Object);
+            Add(cargo.Object);
+        }
+
+        // An empty gas tank: a bottle refill station.
+        public void AddTank(string name)
+        {
+            var inventory = new Mock<IMyInventory>();
+            var tank = new Mock<IMyGasTank>();
+            Place(tank, name, null);
+            tank.SetupGet(t => t.HasInventory).Returns(true);
+            tank.SetupGet(t => t.InventoryCount).Returns(1);
+            tank.Setup(t => t.GetInventory(It.IsAny<int>())).Returns(inventory.Object);
+            tank.Setup(t => t.GetInventory()).Returns(inventory.Object);
+            Add(tank.Object);
+        }
+
         // A connected connector pair between two grids, both ends listed as the terminal system lists them.
         public void Dock(IMyCubeGrid a, IMyCubeGrid b)
         {
@@ -194,12 +224,16 @@ namespace SHEPHERD.Tests
         {
             for (var i = 0; i < count; i++)
             {
-                gameSeconds += WakeSeconds();
+                gameSeconds += WakeSeconds() + pausedSeconds;
                 foreach (var a in beforeTick) a(gameSeconds);
                 echoesThisRun = 0;
                 Program.Main("", UpdateType.Update1);
+                pausedSeconds = 0;
             }
         }
+
+        // Game time the world runs before the script's next run, as when the server leaves the PB unrun.
+        public void Pause(double seconds) => pausedSeconds += seconds;
 
         // Ticks until `done` holds, failing after `limit` ticks so a regression can't hang the run.
         public void TickUntil(Func<bool> done, int limit = 5000)

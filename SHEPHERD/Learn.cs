@@ -124,7 +124,10 @@ namespace IngameScript
                     var q = new Quota(QuotaMode.Exact, -1);
                     if (known != null && !known.TryGetQuota(key, out q)) q = new Quota(QuotaMode.Exact, -1);
                     var value = q.WithAmount(amount);
-                    if (value == null || value == q.WithAmount(q.Target)) continue;
+                    // An amount the line already allows teaches nothing: M is a floor, so more is fine, and L a
+                    // ceiling, so less is.
+                    if (value == null || value == q.WithAmount(q.Target)
+                        || q.Mode == QuotaMode.Min && amount > q.Target || q.Mode == QuotaMode.Limit && amount < q.Target) continue;
                     QuotaLines.Add(new QuotaLine(section, key, value));
                     Lines.Add("learn " + section + " " + key + "=" + value);
                 }

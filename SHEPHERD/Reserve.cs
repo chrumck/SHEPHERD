@@ -4,7 +4,7 @@ namespace IngameScript
 {
     // The value on a quota line decodes to one of these:
     //   100  -> Exact  (keep exactly: add below target, remove excess)
-    //   100M -> Min    (add-only: keep >= target, never remove)
+    //   100M -> Min    (keep >= target; the surplus leaves only to fill another pool's shortfall)
     //   100L -> Limit  (moves as Exact; with A it only disassembles, never assembles)
     //   All  -> All    (fill with everything available, never remove; Target unused)
     // Limit pulls, unlike the established sorters' remove-only L: a reserve container takes items only through its
@@ -185,13 +185,15 @@ namespace IngameScript
             return have < q.Target ? q.Target - have : 0;
         }
 
-        // How many units are over target and should be trimmed (0 if no quota, or a Min/All item which never
-        // removes).
+        // How many units are over target and may leave (0 if no quota, or an All item, which never lets one go). A
+        // Min surplus counts too, though only another pool's intake may take it: the production ledger already sums
+        // every pool's targets against grid-wide stock, so a surplus held back here would leave a short pool that
+        // nothing crafts for.
         public double Excess(string key)
         {
             Quota q;
             if (!quotas.TryGetValue(key, out q)) return 0;
-            if (q.Mode == QuotaMode.Min || q.Mode == QuotaMode.All) return 0;
+            if (q.Mode == QuotaMode.All) return 0;
 
             var have = Count(key);
             return have > q.Target ? have - q.Target : 0;

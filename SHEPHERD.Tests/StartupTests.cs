@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using VRage.Game.ModAPI.Ingame;
 using Xunit;
 
 namespace SHEPHERD.Tests
@@ -109,6 +110,50 @@ namespace SHEPHERD.Tests
             h.Instructions = 0;
             h.Tick(300);
             Assert.Equal(1, h.MostEchoesInARun);
+        }
+
+        // Where the first sweep's line sits relative to the first sort lap's: the log lists the newest line first.
+        static bool RefillLoggedBeforeTheLapEnded(string customData)
+        {
+            var h = new ProgramHarness(ProgramHarness.Grid("Base", true, true), "Base PB", customData);
+            var log = h.AddPanel("Log [SHEPHERD-LOG]");
+            h.AddStock("Stock", new MyInventoryItem(MyItemType.MakeOre("Iron"), 1, 100));
+            h.AddTank("Tank");
+            h.TickUntil(() => log.Count > 0 && log[log.Count - 1].Contains("refilling bottles") && log[log.Count - 1].Contains("no route for"));
+            var lines = new List<string>(log[log.Count - 1].Split('\n'));
+            return lines.FindIndex(l => l.Contains("refilling bottles")) > lines.FindIndex(l => l.Contains("no route for"));
+        }
+
+        [Fact]
+        public void AStartRefillsBottlesAheadOfItsFirstSort()
+        {
+            // The sweep's first runs are cold, and behind a long first sort pass they land past the startup allowance.
+            Assert.True(RefillLoggedBeforeTheLapEnded(""));
+        }
+
+        [Fact]
+        public void PastTheStartupWindowBottlesFollowTheSort()
+        {
+            Assert.False(RefillLoggedBeforeTheLapEnded("[Settings]\nstartupSeconds=0\n"));
+        }
+
+        [Fact]
+        public void AGapBetweenRunsIsLoggedWithItsLength()
+        {
+            List<string> log;
+            var h = Base(out log);
+            h.Pause(12.0);
+            h.Tick();
+            Assert.Matches(@"no run for 12\.\d s \(wall \d+\.\d s\)$", LastLogged(h, log, "no run for").TrimEnd());
+        }
+
+        [Fact]
+        public void RegularRunsLogNoGap()
+        {
+            List<string> log;
+            var h = Base(out log);
+            h.Tick(600);
+            Assert.DoesNotContain(log, frame => frame.Contains("no run for"));
         }
 
         [Fact]
