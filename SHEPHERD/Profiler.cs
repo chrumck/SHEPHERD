@@ -15,20 +15,20 @@ namespace IngameScript
                                   int managed, int dest, int throttles, double throttleSec, int waries, double warySec,
                                   double sim, double simAvg, RunStats stats)
         {
-            sb.Clear();
-            sb.Append("SHEPHERD ").Append(version).Append(" · ").Append(state).Append(" · ").AppendLine(cadence);
-            sb.AppendLine(blockName);
-            sb.Append("cycles ").Append(Count(cycles)).Append(" · uptime ").AppendLine(Dur(stats.WindowSec));
-            sb.Append("managed ").Append(Count(managed)).Append(" · dest ").Append(Count(dest)).AppendLine();
-            sb.Append("peak ").Append(Ms(stats.PeakMs)).Append(" ms · avg50 ").Append(Ms(stats.SlidingAvgMs))
-              .AppendLine(" ms");
+            sb.Empty();
+            sb.Put("SHEPHERD ").Put(version).Put(" · ").Put(state).Put(" · ").Line(cadence);
+            sb.Line(blockName);
+            sb.Put("cycles ").Put(Count(cycles)).Put(" · uptime ").Line(Dur(stats.WindowSec));
+            sb.Put("managed ").Put(Count(managed)).Put(" · dest ").Put(Count(dest)).Line();
+            sb.Put("peak ").Put(Ms(stats.PeakMs)).Put(" ms · avg50 ").Put(Ms(stats.SlidingAvgMs))
+              .Line(" ms");
             // sim = the last instant estimate (the park trigger), then the running average (the resume trigger).
-            sb.Append("thr x").Append(Count(throttles)).Append(" ").Append(Share(throttleSec, stats.WindowSec))
-              .Append(" · wary x").Append(Count(waries)).Append(" ").AppendLine(Share(warySec, stats.WindowSec));
-            sb.Append("sim ").Append(sim.ToString("0.00")).Append("/").Append(simAvg.ToString("0.00")).AppendLine();
-            sb.Append("U1 ").Append(Share(stats.RateSec(0), stats.WindowSec))
-              .Append(" · U10 ").Append(Share(stats.RateSec(1), stats.WindowSec))
-              .Append(" · U100 ").AppendLine(Share(stats.RateSec(2), stats.WindowSec));
+            sb.Put("thr x").Put(Count(throttles)).Put(" ").Put(Share(throttleSec, stats.WindowSec))
+              .Put(" · wary x").Put(Count(waries)).Put(" ").Line(Share(warySec, stats.WindowSec));
+            sb.Put("sim ").Put(sim.ToString("0.00")).Put("/").Put(simAvg.ToString("0.00")).Line();
+            sb.Put("U1 ").Put(Share(stats.RateSec(0), stats.WindowSec))
+              .Put(" · U10 ").Put(Share(stats.RateSec(1), stats.WindowSec))
+              .Put(" · U100 ").Line(Share(stats.RateSec(2), stats.WindowSec));
             Row(sb, stats, RunKind.Fetch);
             Row(sb, stats, RunKind.Scan);
             Row(sb, stats, RunKind.Build);
@@ -46,10 +46,10 @@ namespace IngameScript
 
         static void Row(StringBuilder sb, RunStats stats, RunKind kind)
         {
-            sb.Append(Tag(kind)).Append(" x").Append(Count(stats.Runs(kind)))
-              .Append(" max ").Append(Ms(stats.MaxMs(kind)))
-              .Append(" avg ").Append(Ms(stats.AvgMs(kind)))
-              .Append(" over ").AppendLine(Count(stats.Over(kind)));
+            sb.Put(Tag(kind)).Put(" x").Put(Count(stats.Runs(kind)))
+              .Put(" max ").Put(Ms(stats.MaxMs(kind)))
+              .Put(" avg ").Put(Ms(stats.AvgMs(kind)))
+              .Put(" over ").Line(Count(stats.Over(kind)));
         }
 
         static string Ms(double ms) => ms.ToString("0.000");

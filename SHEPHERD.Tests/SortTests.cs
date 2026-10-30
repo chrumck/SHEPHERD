@@ -64,8 +64,10 @@ namespace SHEPHERD.Tests
             public bool IsSameAs(ICategoryAcceptor acceptor) => Own.Contains(acceptor);
             public bool CanPlaceAt(int index, ICategoryAcceptor target) => ((Target)target).CanAccept;
             public void Prepare(int index, ICategoryAcceptor target) { pendingIndex = index; pendingTarget = target; }
-            public CommitResult Commit()
+            public int DryCommits;
+            public CommitResult Commit(bool dry)
             {
+                if (dry) { DryCommits++; return CommitResult.ItemGone; }
                 Moved.Add(Stacks[pendingIndex]);
                 MovedIndex.Add(pendingIndex);
                 MovedTo.Add(pendingTarget);
@@ -136,8 +138,9 @@ namespace SHEPHERD.Tests
             }
             public bool VanishOnCommit;      // next Commit: the stack disappears mid-flight (taken by another machine)
 
-            public CommitResult Commit()
+            public CommitResult Commit(bool dry)
             {
+                if (dry) return CommitResult.ItemGone;
                 var i = pendingIndex;
                 pendingIndex = -1;
                 if (VanishOnCommit)
@@ -224,13 +227,64 @@ namespace SHEPHERD.Tests
             public bool IsSameAs(ICategoryAcceptor acceptor) => false;
             public bool CanPlaceAt(int index, ICategoryAcceptor target) => ((Target)target).CanAccept;
             public void Prepare(int index, ICategoryAcceptor target) { pendingIndex = index; }
-            public CommitResult Commit()
+            public CommitResult Commit(bool dry)
             {
+                if (dry) return CommitResult.ItemGone;
                 stacks.RemoveAt(pendingIndex);
                 pendingIndex = -1;
                 Moves++;
                 return CommitResult.Moved;
             }
+        }
+
+        [Fact]
+        public void ADryPassSendsEveryTargetOneMoveAndMovesNothing()
+        {
+            // Nothing needs to move and one target is full, yet each target's commit code runs once.
+            var full = new Target(false, false, Categories.Ores);
+            var open = new Target(true, false, Categories.Ores);
+            var src = new Source(Categories.Ores, Categories.Ores);
+            src.Keep.Add(Categories.Ores);
+            var job = new SortJob(Sources(src), Route(full, open), 0) { Dry = true };
+
+            Assert.Equal(0, DriveToDone(job));
+            Assert.Empty(src.Moved);
+            Assert.Equal(2, src.DryCommits);
+            Assert.Equal(2, src.Stacks.Count);
+        }
+
+        // A dry stack walks its whole route three times, and a quoted item routes to every reserve container of its
+        // pool: on a grid with a hundred of them a dry step overran the instruction cap.
+        [Fact]
+        public void ADryStackDrawsTheBudgetByItsRoute()
+        {
+            var targets = new List<ICategoryAcceptor>();
+            for (var i = 0; i < 150; i++) targets.Add(new Target(true, false, Categories.Ores));
+            var src = new Source();
+            for (var i = 0; i < 20; i++) src.Stacks.Add(Categories.Ores);
+            var job = new SortJob(Sources(src), new RoutingIndex(targets), 100) { Dry = true };
+            var steps = 0;
+            while (job.Step() != StepResult.Done) Assert.True(++steps < 1000);
+            Assert.True(steps >= 19, "steps: " + steps);
+        }
+
+        static int StepsToDone(SortJob job)
+        {
+            var steps = 1;
+            while (job.Step() != StepResult.Done) Assert.True(++steps < 1000);
+            return steps;
+        }
+
+        // Every other check reports the run past half the instruction cap: a step takes one stack, not its budget.
+        [Fact]
+        public void AStepYieldsOnceTheRunIsPastHalfTheCap()
+        {
+            var src = new Source();
+            for (var i = 0; i < 20; i++) src.Stacks.Add(Categories.Ores);
+            src.Keep.Add(Categories.Ores);
+            var reads = 0;
+            Assert.Equal(1, StepsToDone(new SortJob(Sources(src), Route(new Target(true, false, Categories.Ores)), 100)));
+            Assert.True(StepsToDone(new SortJob(Sources(src), Route(new Target(true, false, Categories.Ores)), 100) { Full = () => reads++ % 2 == 1 }) >= 10);
         }
 
         [Fact]

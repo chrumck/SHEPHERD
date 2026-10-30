@@ -25,7 +25,7 @@ namespace SHEPHERD.Tests
             public AssemblerMark Mark { get; set; } = AssemblerMark.Main;
             public bool CanCooperate => true;
             public bool Cooperative { get; set; }
-            public void SetCooperative(bool on) => Cooperative = on;
+            public void SetCooperative(bool on, bool dry) { if (!dry) Cooperative = on; }
             public string Model => "LargeAssembler";
             public double Speed => 1;
             public bool IsWorking { get; set; } = true;
@@ -45,14 +45,14 @@ namespace SHEPHERD.Tests
                 foreach (var pair in Output) into[pair.Key] = pair.Value;
             }
 
-            public void Append(string blueprint, double amount) => Queue.Add(new QueueEntry(blueprint, amount));
-            public double Trim(string blueprint, double amount) => 0;
-            public void SetDisassembling(bool on) => IsDisassembling = on;
-            public void ClearQueue() { }
+            public void Append(string blueprint, double amount, bool dry) { if (!dry) Queue.Add(new QueueEntry { Blueprint = blueprint, Amount = amount }); }
+            public double Trim(string blueprint, double amount, bool dry) => 0;
+            public void SetDisassembling(bool on, bool dry) { if (!dry) IsDisassembling = on; }
+            public void ClearQueue(bool dry) { }
         }
 
         static AssemblerSnapshot Snapshot(Assembler assembler) =>
-            new AssemblerSnapshot(assembler, assembler.Queue.Count == 0, QueueAmount(assembler), 1);
+            new AssemblerSnapshot { State = assembler, QueueEmpty = assembler.Queue.Count == 0, QueueAmount = QueueAmount(assembler), Speed = 1 };
 
         static double QueueAmount(Assembler assembler)
         {
@@ -90,7 +90,7 @@ namespace SHEPHERD.Tests
             var free = new Assembler(2, "ModTool");
             var actions = new List<CraftAction>
             {
-                new CraftAction(CraftActionKind.AppendAssembly, busy, "Known", 1, "Component/Known")
+                new CraftAction { Kind = CraftActionKind.AppendAssembly, Assembler = busy, Blueprint = "Known", Amount = 1, Item = "Component/Known" }
             };
             var probe = new BlueprintProbe();
             probe.Plan("PhysicalGunObject/ModToolItem",
@@ -134,7 +134,7 @@ namespace SHEPHERD.Tests
         public void ManualTeachingRecordsOnlyRequestedOutput()
         {
             var assembler = new Assembler(1);
-            assembler.Queue.Add(new QueueEntry("UnknownBlueprint", 1));
+            assembler.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 1 });
             var probe = new BlueprintProbe();
             probe.Plan("Component/Requested", new List<AssemblerSnapshot>(), new List<CraftAction>());
             Assert.Equal(BlueprintPhase.Manual, probe.Phase);
@@ -149,7 +149,7 @@ namespace SHEPHERD.Tests
         public void ManualTeachingRejectsAnUnrelatedOutput()
         {
             var assembler = new Assembler(1);
-            assembler.Queue.Add(new QueueEntry("UnknownBlueprint", 1));
+            assembler.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 1 });
             var probe = new BlueprintProbe();
             probe.Plan("Component/Requested", new List<AssemblerSnapshot>(), new List<CraftAction>());
             var states = new List<IAssemblerState> { assembler };

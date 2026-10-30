@@ -3,9 +3,9 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    public sealed class ProductionLedger
+    public class ProductionLedger
     {
-        sealed class Entry
+        class Entry
         {
             public double Stock, Caught, Incoming, Outgoing, Protected, ProductionFloor, ProductionCap, Retained;
             public bool Disassemble, HasAll;
@@ -23,7 +23,7 @@ namespace IngameScript
         public void Begin()
         {
             foreach (var e in items.Values) spare.Push(e);
-            items.Clear();
+            items.Empty();
         }
 
         public void AddStock(string key, double amount) => At(key).Stock += amount;
@@ -54,21 +54,21 @@ namespace IngameScript
         public double AssemblyDeficit(string key)
         {
             Entry e;
-            if (!items.TryGetValue(key, out e) || IsType(key, "Ingot") || IsType(key, "Ore")) return 0;
+            if (!items.Get(key, out e) || IsType(key, "Ingot") || IsType(key, "Ore")) return 0;
             return Deficit(e);
         }
 
         public double RefineDeficit(string key)
         {
             Entry e;
-            if (!items.TryGetValue(key, out e) || !IsType(key, "Ingot")) return 0;
+            if (!items.Get(key, out e) || !IsType(key, "Ingot")) return 0;
             return Deficit(e);
         }
 
         public double DisassemblySurplus(string key)
         {
             Entry e;
-            if (!items.TryGetValue(key, out e)) return 0;
+            if (!items.Get(key, out e)) return 0;
             var s = Surplus(e, key) - e.Outgoing;
             return s > 0 ? s : 0;
         }
@@ -78,7 +78,7 @@ namespace IngameScript
         public double QueuedExcess(string key, bool disassembly)
         {
             Entry e;
-            if (!items.TryGetValue(key, out e)) return 0;
+            if (!items.Get(key, out e)) return 0;
             var need = disassembly ? Surplus(e, key) : Need(e);
             return (disassembly ? e.Outgoing : e.Incoming) - (need > 0 ? need : 0);
         }
@@ -89,7 +89,7 @@ namespace IngameScript
         public double Available(string key)
         {
             Entry e;
-            if (!items.TryGetValue(key, out e)) return 0;
+            if (!items.Get(key, out e)) return 0;
             var a = e.Stock - e.Protected - e.Retained;
             return a > 0 ? a : 0;
         }
@@ -97,37 +97,37 @@ namespace IngameScript
         public double Stock(string key)
         {
             Entry e;
-            return items.TryGetValue(key, out e) ? e.Stock : 0;
+            return items.Get(key, out e) ? e.Stock : 0;
         }
 
         public double Caught(string key)
         {
             Entry e;
-            return items.TryGetValue(key, out e) ? e.Caught : 0;
+            return items.Get(key, out e) ? e.Caught : 0;
         }
 
         public double Incoming(string key)
         {
             Entry e;
-            return items.TryGetValue(key, out e) ? e.Incoming : 0;
+            return items.Get(key, out e) ? e.Incoming : 0;
         }
 
         public double Outgoing(string key)
         {
             Entry e;
-            return items.TryGetValue(key, out e) ? e.Outgoing : 0;
+            return items.Get(key, out e) ? e.Outgoing : 0;
         }
 
         public void CollectKeys(List<string> into)
         {
-            into.Clear();
-            foreach (var key in items.Keys) into.Add(key);
+            into.Empty();
+            foreach (var key in items.Keys) into.Push(key);
         }
 
         Entry At(string key)
         {
             Entry e;
-            if (items.TryGetValue(key, out e)) return e;
+            if (items.Get(key, out e)) return e;
             e = spare.Count > 0 ? spare.Pop() : new Entry();
             e.Reset();
             items[key] = e;
@@ -158,7 +158,7 @@ namespace IngameScript
 
         static bool IsType(string key, string type) =>
             key.Length > type.Length && key[type.Length] == '/'
-            && key.StartsWith(type, System.StringComparison.Ordinal);
+            && key.Starts(type);
     }
 
     // How the ledger's stock walk treats one sort source. CatchAll = a catch-all container, plain stock also tallied
@@ -170,14 +170,8 @@ namespace IngameScript
     // One live assembler-queue entry, game-free: the blueprint subtype and its queued unit count.
     public struct QueueEntry
     {
-        public readonly string Blueprint;
-        public readonly double Amount;
-
-        public QueueEntry(string blueprint, double amount)
-        {
-            Blueprint = blueprint;
-            Amount = amount;
-        }
+        public string Blueprint;
+        public double Amount;
     }
 
     // The assembler view the ledger walk and the craft planner/stepper share, behind an interface so both stay
@@ -194,27 +188,19 @@ namespace IngameScript
         void QueueInto(List<QueueEntry> into);
         void OutputInto(Dictionary<string, double> into);
         bool CanUse(string blueprint);
-        void Append(string blueprint, double amount);
-        double Trim(string blueprint, double amount);
-        void SetDisassembling(bool on);
-        void ClearQueue();
+        void Append(string blueprint, double amount, bool dry);
+        double Trim(string blueprint, double amount, bool dry);
+        void SetDisassembling(bool on, bool dry);
+        void ClearQueue(bool dry);
     }
 
     // Queue state and speed are captured during attribution so later planning never re-reads an assembler.
     public struct AssemblerSnapshot
     {
-        public readonly IAssemblerState State;
-        public readonly bool QueueEmpty;
-        public readonly double QueueAmount;
-        public readonly double Speed;
-
-        public AssemblerSnapshot(IAssemblerState state, bool queueEmpty, double queueAmount, double speed)
-        {
-            State = state;
-            QueueEmpty = queueEmpty;
-            QueueAmount = queueAmount;
-            Speed = speed;
-        }
+        public IAssemblerState State;
+        public bool QueueEmpty;
+        public double QueueAmount;
+        public double Speed;
     }
 
     // The ledger-ingestion cycle phase — the ProductionLedger's runtime feeder. One bounded slice per Step (the
@@ -223,12 +209,15 @@ namespace IngameScript
     // then every pool's quotas. A reserve container's stacks are also tallied into its pool here, so the pool's count
     // costs no read of its own. All reads are local (GetItems/GetQueue) — no conveyor call, so the scheduler
     // treats its ticks as cheap and never arms the heavy refractory. Pooled: Rearm per cycle, never reallocated.
-    public sealed class LedgerJob : IStepJob
+    public class LedgerJob : IStepJob
     {
         readonly ProductionLedger ledger;
         readonly ProductionFacts facts;
         readonly Dictionary<string, ReservePool> pools;
         readonly int examineBudget;
+        // Set by Program: the run has passed half the instruction cap. A unit's cost grows with the grid, and the cap
+        // stops the script outright, so a step yields then too.
+        public Func<bool> Full = () => false;
         readonly List<QueueEntry> queueScratch = new List<QueueEntry>();
         public readonly List<AssemblerSnapshot> Snapshots = new List<AssemblerSnapshot>();
         List<ISortSource> sources;
@@ -258,7 +247,7 @@ namespace IngameScript
             sourceCursor = 0;
             itemCursor = 0;
             assemblerCursor = 0;
-            Snapshots.Clear();
+            Snapshots.Empty();
             done = false;
             ledger.Begin();
             foreach (var pool in pools.Values) pool.BeginTally();
@@ -284,7 +273,7 @@ namespace IngameScript
                 var n = src.Count;
                 while (itemCursor < n)
                 {
-                    if (examined >= examineBudget) return StepResult.Scanned;
+                    if (examined >= examineBudget || Full()) return StepResult.Scanned;
                     Tally(src, itemCursor, kind);
                     if (pool != null) pool.Tally(src.KeyAt(itemCursor), src.AmountAt(itemCursor));
                     itemCursor++;
@@ -292,12 +281,12 @@ namespace IngameScript
                 }
                 NextSource();
                 examined++;         // charge the snapshot itself, like the sort walk
-                if (examined >= examineBudget) return StepResult.Scanned;
+                if (examined >= examineBudget || Full()) return StepResult.Scanned;
             }
 
             while (assemblerCursor < assemblers.Count)
             {
-                if (examined >= examineBudget) return StepResult.Scanned;
+                if (examined >= examineBudget || Full()) return StepResult.Scanned;
                 TallyAssembler(assemblers[assemblerCursor]);
                 assemblerCursor++;
                 examined++;
@@ -348,7 +337,7 @@ namespace IngameScript
                 if (outgoing) ledger.AddOutgoing(key, entry.Amount);
                 else if (assembler.IsOperational) ledger.AddIncoming(key, entry.Amount);
             }
-            Snapshots.Add(new AssemblerSnapshot(assembler, queueScratch.Count == 0, queueAmount, assembler.Speed));
+            Snapshots.Push(new AssemblerSnapshot { State = assembler, QueueEmpty = queueScratch.Count == 0, QueueAmount = queueAmount, Speed = assembler.Speed });
         }
     }
 }

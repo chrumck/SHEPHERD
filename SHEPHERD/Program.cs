@@ -33,7 +33,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.29";
+        const string ScriptVersion = "1.0.40";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -59,7 +59,9 @@ namespace IngameScript
         const double BackoffLogQuietSeconds = 60.0;
         const double StartupLogSeconds = 180.0;    // how long after a start every run over the peak bar is logged
         const double RunGapLogSeconds = 5.0;       // 3x the slowest cadence's gap
-        const double PackMs = 50.0;                // a start's packed run stops taking more steps past this
+        // A start's packed run stops taking more steps past this. The first calls compile for 14–95 ms each in game,
+        // and spike pacing allows two long runs per 10.5 s, so a budget under one call gives each its own run.
+        const double PackMs = 150.0;
         // How long a start packs its runs and skips the breach back-off: well inside the limiter's per-PB startup
         // allowance (about a minute from a block's first run), so the cold first calls land in it.
         const double DefaultStartupSeconds = 45.0;
@@ -98,23 +100,34 @@ namespace IngameScript
         // The user's own section: read on load like the reserve quotas. SHEPHERD only adds the keys it lacks, so
         // every setting and its value is listed in Custom Data without a trip to the guide.
         const string SettingsSection = "Settings";
-        const string PriorityKey = "priority";
-        const string FactionShareKey = "factionShare";
-        const string DockedProductionKey = "dockedProduction";
-        const string DockedFuelKey = "dockedFuel";
-        const string PeakMsKey = "peakMs";
-        const string ParkSimKey = "parkSim";
-        const string ResumeSimKey = "resumeSim";
-        const string BackoffSimKey = "backoffSim";
-        const string SpikeMsKey = "spikeMs";
-        const string SpikeWindowKey = "spikeWindowSeconds";
-        const string StartupKey = "startupSeconds";
-        const string UtcOffsetKey = "utcOffsetHours";
-        const string ReactorFillKey = "reactorFillPct";
-        const string GasGenFillKey = "gasGenFillPct";
-        const string RefineryFillKey = "refineryFillPct";
-        const string BottleSweepKey = "bottleSweepMinutes";
-        const string SortPassKey = "sortPassSeconds";
+        // In the guide's order, which AddMissing keeps when it appends the keys a section lacks. Each rule is
+        // {low, high, default}; priority is any whole number and the three switches are true/false.
+        static readonly string[] SettingKeys = ("utcOffsetHours,reactorFillPct,gasGenFillPct,refineryFillPct,bottleSweepMinutes,"
+            + "sortPassSeconds,priority,factionShare,dockedProduction,dockedFuel,peakMs,parkSim,resumeSim,backoffSim,spikeMs,"
+            + "spikeWindowSeconds,startupSeconds").Split(',');
+        const int UtcOffset = 0, ReactorFill = 1, GasGenFill = 2, RefineryFill = 3, BottleSweep = 4, SortPass = 5, Priority = 6,
+            FactionShare = 7, DockedProduction = 8, DockedFuel = 9, PeakMs = 10, ParkSim = 11, ResumeSim = 12, BackoffSim = 13,
+            SpikeMs = 14, SpikeWindow = 15, Startup = 16;
+        static readonly double[] SettingRules =
+        {
+            -14, 14, 0,
+            0, 100, 15,
+            0, 100, 50,
+            0, 100, 30,
+            0, 1e6, 3,
+            0, 1e6, 60,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0, 0,
+            0.001, 1000, Pacer.DefaultPeakMs,
+            0, 0.99, Pacer.DefaultParkSim,
+            0, 1, Pacer.DefaultResumeSim,
+            0, 1, Pacer.DefaultBackoffSim,
+            0.001, 1000, Pacer.DefaultSpikeMs,
+            0, 1e6, Pacer.DefaultSpikeWindowSec,
+            0, 1e6, DefaultStartupSeconds
+        };
 
         readonly List<IMyTerminalBlock> blockBuffer = new List<IMyTerminalBlock>();
         // Its own buffer, not blockBuffer's: the classify cursor iterates blockBuffer across ticks, so re-counting
@@ -140,6 +153,7 @@ namespace IngameScript
         readonly ProductionFacts productionFacts = new ProductionFacts();
         // One delegate for every cycle's refinery feeds (a per-cycle method-group conversion would allocate).
         readonly Func<string, bool> openRefineryTakes;
+        readonly Func<bool> full;      // the run is past half the instruction cap; every step loop yields then
         // Unknown-yield ores yield learning is waiting on (a live deficit + a request, an under-sampled stock, or
         // the active sample) — withheld from open greedy feeds so the sample can accumulate. Rebuilt each plan;
         // without demand it stays empty and unknown ores (e.g. a modded processor's fuel ore) feed freely.
@@ -167,26 +181,20 @@ namespace IngameScript
         RoutingIndex cycleRouting;       // built at the build phase, consumed when the plan tick enqueues the sort
         List<ManagedBlock> managedBlocks;
         long persistedDisassembler;      // the tracking state as last written, so a flush fires only on the edge
-        int leadPriority;                // this PB's rank among SHEPHERD PBs managing the same blocks, from [Settings]
-        bool factionShare;               // [Settings]: also manage blocks shared with the PB owner's faction
-        bool dockedProduction;           // [Settings]: also manage docked refineries and assemblers
-        bool dockedFuel;                 // [Settings]: also top up docked reactors and gas generators
-        // [Settings]: the limiter bars the Pacer throttles against, kept here for the configReload readback.
-        double peakMs, parkSim, resumeSim, backoffSim, spikeMs, spikeWindowSeconds, startupSeconds;
-        // [Settings]: hours added to UTC for the clock (display only); how full to keep each machine kind's input,
-        // as a percent of its max volume (0 = don't feed that kind); minutes between bottle sweeps (0 = none).
-        double utcOffsetHours, reactorFillPct, gasGenFillPct, refineryFillPct, bottleSweepMinutes;
-        // [Settings]: the longest one sort pass may run before the cycle ends and rescans (0 = no cap). Re-planning,
-        // reserve counts and a due bottle sweep all wait for the pass, which a backlog stretches to minutes; a rescan
-        // costs a few seconds of phase ticks, so this trades that overhead against how stale those inputs may get.
-        double sortPassSeconds;
+        // [Settings], indexed by the constants above. A sort pass's cap trades a rescan's few seconds of phase ticks
+        // against how stale re-planning, reserve counts and a due bottle sweep get while a backlog stretches the pass.
+        readonly double[] settings = new double[17];
         readonly PeerElection election = new PeerElection();
         readonly IMyBroadcastListener leadListener;
         string leader;                   // the live peer this PB stands by for; null while it does the work
-        // A ledger walk has completed since compile. Until then an outranked PB keeps scanning instead of standing by:
-        // the first run of each path is slow (its methods compile), and paid inside the limiter's startup allowance
-        // it is free, while a stand-by would defer it to the resume — an undock, long after the allowance.
+        // The dry cycle has run since compile (QueueDryRun). Until then an outranked PB keeps working instead of
+        // standing by: the first run of each path is slow (its methods compile), and paid inside the limiter's startup
+        // allowance it is free, while a stand-by would defer it to the resume — an undock, long after the allowance.
         bool warmedUp;
+        bool dryFlush;          // the dry cycle's config save is due
+        int dryRuns;            // dry cycles queued since compile
+        readonly CraftJob dryCraft = new CraftJob { Dry = true };
+        readonly List<CraftAction> dryActions = new List<CraftAction>();
         // The stand-by status panel's one message block ("<leader> leads"), refilled only on a lead change.
         readonly List<string> standbyLines = new List<string>();
         readonly List<List<string>> standbyMessages = new List<List<string>>();
@@ -213,6 +221,10 @@ namespace IngameScript
         readonly Dictionary<long, double> harvestedAt = new Dictionary<long, double>();
         readonly Dictionary<int, long> dueOutputs = new Dictionary<int, long>();
         RunKind lastTickKind;      // what last tick did → THIS tick's LastRunTimeMs is that kind's cost (one tick late)
+        // What last tick did beyond its kind, for the slow and throttling lines: a catch-all othr run can be a find,
+        // a bottle step, a panel or nothing at all, and only the job tells our own cold path from an outside stall.
+        string lastJob, lastPanel;
+        bool lastBeat;             // last tick sent the election heartbeat
         int lastBackoffs;          // last-seen Pacer.Backoffs → a fresh breach back-off engaged
         int lastEscalations;       // last-seen Pacer.Escalations → a back-off escalated to a park
         int lastSpikes;            // last-seen Pacer.Spikes → a run over the spike bar
@@ -222,6 +234,9 @@ namespace IngameScript
         DateTime runStart;
         bool starting;             // this run is within startupSeconds of the start
         bool panelsDrawn;          // every panel of a finished scan has drawn once
+        bool heavyRun;             // the pacer allowed a heavy call when this run began
+        int runInstructions;       // the previous run's instruction count, for its slow line
+        int stepPeak;              // the most instructions one step or render has used
         double gameSeconds;                          // lifetime game-time clock for the yield sample's pace deltas
         int scopeBlocks;
         double lastScopeProbeSec;
@@ -283,6 +298,7 @@ namespace IngameScript
         IMyTerminalBlock logLcd;
         List<ReserveContainer> reserveLcds;
         List<Destination> stockLcds;
+        List<IMyLightingBlock> lights;
         // The stock LCDs' item keys and their categories, parallel, retaken once per completed ledger tally; keys
         // sorted so the panel order doesn't shuffle between cycles.
         readonly List<string> stockKeys = new List<string>();
@@ -313,21 +329,23 @@ namespace IngameScript
             shipPoolStates = new StateChannel(Log);
             quotaStates = new StateChannel(Log);
             production = new ProductionStatus(Log);
-            statusMessages.Add(learnStates.Current);
-            statusMessages.Add(production.Actions);
-            statusMessages.Add(production.States);
-            statusMessages.Add(unreachableStates.Current);
-            statusMessages.Add(bottleStates.Current);
-            statusMessages.Add(reserveStates.Current);
-            statusMessages.Add(quotaStates.Current);
-            standbyMessages.Add(standbyLines);
+            statusMessages.Push(learnStates.Current);
+            statusMessages.Push(production.Actions);
+            statusMessages.Push(production.States);
+            statusMessages.Push(unreachableStates.Current);
+            statusMessages.Push(bottleStates.Current);
+            statusMessages.Push(reserveStates.Current);
+            statusMessages.Push(quotaStates.Current);
+            standbyMessages.Push(standbyLines);
             ingotRoomProbe = IngotHasHome;
             openRefineryTakes = OpenRefineryTakes;
-            foreach (var cat in Categories.All) categoryFills.Add(new CategoryFill(cat));
+            full = () => Runtime.CurrentInstructionCount > Runtime.MaxInstructionCount / 2;
+            classifyCursor.Full = full;
+            foreach (var cat in Categories.All) categoryFills.Push(new CategoryFill(cat));
             fetchJob = new PhaseJob(FetchPhase, StepResult.Fetched);
             classifyJob = new PhaseJob(ClassifyPhase, StepResult.Classified);
             buildJob = new PhaseJob(BuildPhase, StepResult.Classified);
-            ledgerJob = new LedgerJob(productionLedger, productionFacts, reservePools, ExamineBudget);
+            ledgerJob = new LedgerJob(productionLedger, productionFacts, reservePools, ExamineBudget) { Full = full };
             planJob = new PhaseJob(PlanPhase, StepResult.Planned);
             learnJob = new PhaseJob(LearnStep, StepResult.Classified);
             leadListener = IGC.RegisterBroadcastListener(LeadChannel);
@@ -349,18 +367,21 @@ namespace IngameScript
         public void Main(string argument, UpdateType updateSource)
         {
             var isTick = (updateSource & (UpdateType.Update1 | UpdateType.Update10 | UpdateType.Update100)) != 0;
-            if (isTick) { Tick(); return; }
+            if (isTick) { Tick(); runInstructions = Runtime.CurrentInstructionCount; return; }
 
             // Not the scheduled loop — a command, trigger, or the limiter's cooperative shutdown signal. The next
             // tick reads THIS run's ms, so book the previous tick's sample now and charge this run to its own kind,
             // else a command's cost lands on whatever the last tick happened to do.
             stats.Record(Runtime.LastRunTimeMs, lastTickKind);
             lastTickKind = RunKind.Command;
+            lastJob = argument;
+            lastPanel = null;
+            lastBeat = false;
             if (argument != null && argument.StartsWith(GracefulShutDownArg)) HandleGracefulShutDown(argument);
             else if (argument == "configReload")
             {
                 // A learned fact waiting for its flush would be dropped by the reload's re-seed from disk.
-                if (flushPending) { flushPending = fillSettings = false; FlushConfig(); }
+                if (flushPending) { flushPending = fillSettings = false; FlushConfig(false); }
                 ResetCycle();
                 ShowCommandResult(ReloadConfig());
             }
@@ -380,6 +401,7 @@ namespace IngameScript
             // TimeSinceLastRun on the next tick counts from THIS run, so the wall clock must too — else the sim
             // estimate's game/wall intervals diverge and a command run reads as a spurious lag dip.
             lastRunWallClock = DateTime.UtcNow;
+            runInstructions = Runtime.CurrentInstructionCount;
         }
 
         // One scheduled run. The Pacer (driven by the previous run's ms) decides whether a heavy call may fire and
@@ -395,13 +417,17 @@ namespace IngameScript
             var dt = Runtime.TimeSinceLastRun.TotalSeconds; // game time: under lag it under-runs the wall clock
             var now = DateTime.UtcNow;                      // by the sim ratio the limiter divides each run's ms by
             runStart = now;
-            starting = (now - startedAt).TotalSeconds < startupSeconds;
+            starting = (now - startedAt).TotalSeconds < settings[Startup];
             var wall = (now - lastRunWallClock).TotalSeconds;
             lastRunWallClock = now;
             // Game time only passes between runs while the world ticks, so a long gap means the server left this PB
             // unrun: one way a peer's heartbeats go missing after a server restart.
             if (dt > RunGapLogSeconds && gameSeconds > 0.0) Log("no run for " + dt.ToString("0.0") + " s (wall " + wall.ToString("0.0") + " s)");
             var prevKind = lastTickKind;            // the run whose ms may arm a back-off in Observe below
+            string prevJob = lastJob, prevPanel = lastPanel;
+            var prevBeat = lastBeat;
+            lastJob = lastPanel = null;
+            lastBeat = false;
             stats.Record(lastRunMs, prevKind);
             var f = Runtime.UpdateFrequency;        // the interval just elapsed ran at the rate set last tick
             stats.AddElapsed(dt, (f & UpdateFrequency.Update1) != 0 ? 0 : (f & UpdateFrequency.Update10) != 0 ? 1 : 2);
@@ -412,6 +438,7 @@ namespace IngameScript
             // The limiter checks nothing in its startup allowance, so a start's slow runs arm no back-off: it would
             // only hold back the next cold path.
             pacer.Observe(lastRunMs, dt, activelyWorking && !starting, wall, starting);
+            heavyRun = pacer.AllowHeavy;
             if (pacer.SimParked != simParkLogged)
             {
                 simParkLogged = pacer.SimParked;
@@ -421,10 +448,11 @@ namespace IngameScript
             // A warmed-up PB standing by does no work at all, and renders only a panel the leader doesn't draw.
             if (StandingBy() && warmedUp)
             {
+                lastJob = "standby";
                 Echo(echoText);
                 if (!election.LeaderOnOurConstruct && !pacer.Quiet) RenderStandingBy();
                 ApplyCadence(Cadence.Parked);
-                LogPacing(prevKind, lastRunMs, now);
+                LogPacing(prevKind, prevJob, prevPanel, prevBeat, lastRunMs, now);
                 return;
             }
             var observed = DoTickWork();
@@ -439,12 +467,18 @@ namespace IngameScript
             {
                 Echo(echoText);
                 var first = renderCursor;
-                do RenderTick(); while (starting && !panelsDrawn && renderCursor != first && Room());
+                do
+                {
+                    var at = Runtime.CurrentInstructionCount;
+                    RenderTick();
+                    Measure(at);
+                }
+                while (starting && !panelsDrawn && renderCursor != first && Room());
                 if (renderCursor == first && destinations != null) panelsDrawn = true;
             }
 
             ApplyCadence(pacer.NextCadence(backlog));
-            LogPacing(prevKind, lastRunMs, now);
+            LogPacing(prevKind, prevJob, prevPanel, prevBeat, lastRunMs, now);
         }
 
         // History only, never the status panel: throttling is common and expected (mostly external GC stalls the
@@ -454,14 +488,18 @@ namespace IngameScript
         // in Observe off lastRunMs). Every tick calls it, standing by too, so the counters never lag the runs.
         // Wall time since the start, as the limiter's startup allowance counts it: a run over the peak bar in the
         // first minutes says whether the cold runs finished inside that allowance, and which one did not.
-        void LogPacing(RunKind prevKind, double lastRunMs, DateTime now)
+        void LogPacing(RunKind prevKind, string job, string panel, bool beat, double lastRunMs, DateTime now)
         {
             var engaged = pacer.Backoffs > lastBackoffs;
             var throttled = pacer.Escalations > lastEscalations || pacer.Spikes > lastSpikes || engaged && gameSeconds - lastBackoffSec >= BackoffLogQuietSeconds;
             var sinceStart = (now - startedAt).TotalSeconds;
-            if (throttled || lastRunMs > peakMs && sinceStart < StartupLogSeconds)
-                Log((throttled ? "throttling " + CadenceLabel() + " (" : "slow (") + Profiler.Tag(prevKind) + " "
-                    + lastRunMs.ToString("0.000") + "ms) +" + sinceStart.ToString("0") + "s");
+            if (throttled || lastRunMs > settings[PeakMs] && sinceStart < StartupLogSeconds)
+            {
+                if (panel != null) job = job == null ? panel : job + "+" + panel;
+                if (beat) job = job == null ? "beat" : job + "+beat";
+                Log((throttled ? "throttling " + CadenceLabel() + " (" : "slow (") + Profiler.Tag(prevKind) + " " + (job ?? "none") + " "
+                    + lastRunMs.ToString("0.000") + "ms " + runInstructions + "i) +" + sinceStart.ToString("0") + "s");
+            }
             if (engaged) lastBackoffSec = gameSeconds;
             lastBackoffs = pacer.Backoffs;
             lastEscalations = pacer.Escalations;
@@ -469,8 +507,16 @@ namespace IngameScript
         }
 
         // Room in this run for another step or render while the start packs them: a stall the server can absorb,
-        // and far from the instruction cap, which aborts a script outright.
-        bool Room() => (DateTime.UtcNow - runStart).TotalMilliseconds < PackMs && Runtime.CurrentInstructionCount < Runtime.MaxInstructionCount / 10;
+        // and far from the instruction cap, which aborts a script outright — under a quarter of it, and with room for
+        // twice the largest step seen, as a step's cost grows with the grid.
+        bool Room() => (DateTime.UtcNow - runStart).TotalMilliseconds < PackMs && Runtime.CurrentInstructionCount < Runtime.MaxInstructionCount / 4
+            && Runtime.CurrentInstructionCount + 2 * stepPeak < Runtime.MaxInstructionCount;
+
+        void Measure(int at)
+        {
+            var used = Runtime.CurrentInstructionCount - at;
+            if (used > stepPeak) stepPeak = used;
+        }
 
         // True when a blueprint observation took the tick, which then renders nothing either.
         bool DoTickWork()
@@ -480,44 +526,52 @@ namespace IngameScript
                 if (blueprintProbe.NeedsObservation && !pacer.Halted && !pacer.Throttled)
                 {
                     discoveryObserveTurn = !discoveryObserveTurn;
-                    if (discoveryObserveTurn) { ObserveBlueprint(); return true; }
+                    if (discoveryObserveTurn) { lastJob = "probe"; ObserveBlueprint(); return true; }
                 }
                 // Every expensive op runs only when the Pacer allows a heavy call — so a back-off or a
-                // GracefulShutDown:: stand-down holds the scan too, not just transfers.
-                if (!pacer.AllowHeavy) return false;
+                // GracefulShutDown:: stand-down holds the scan too, not just transfers. A start's run that began
+                // allowed goes on past its first heavy call, the election's scope scan included.
+                if (!pacer.AllowHeavy && !(starting && heavyRun && Room())) return false;
 
                 // The rewrite re-parses and re-serializes the whole Custom Data, so it gets a tick of its own and
-                // the refractory after it, like any other allocation burst.
-                if (flushPending)
+                // the refractory after it, like any other allocation burst — except in a start, which the limiter
+                // doesn't check and which has first calls to pack.
+                if (flushPending || dryFlush)
                 {
-                    flushPending = false;
-                    var reload = learnCommit;
-                    FlushConfig();
+                    var dry = !flushPending;
+                    flushPending = dryFlush = false;
+                    var reload = learnCommit && !dry;
+                    FlushConfig(dry);
                     // Learned quotas live only in the user's [Reserve...] sections, so the pools re-read them.
                     if (reload) ReloadConfig();
                     lastTickKind = RunKind.Save;
                     pacer.NotifyHeavyFired();
-                    return false;
+                    if (!starting || !Room()) return false;
                 }
                 if (driver.HasWork && gameSeconds - lastScopeProbeSec >= ScopeProbeSeconds)
                 {
                     ProbeScope();
-                    return false;
+                    if (!starting || !Room()) return false;
                 }
                 if (!driver.HasWork) StartCycle();
 
                 StepResult r;
+                bool drySweep;
                 do
                 {
                     var pass = driver.Current as SortJob;
-                    if (pass != null && sortPassSeconds > 0.0 && gameSeconds - sortPassStartSec >= sortPassSeconds) pass.Stop();
+                    if (pass != null && !pass.Dry && settings[SortPass] > 0.0 && gameSeconds - sortPassStartSec >= settings[SortPass]) pass.Stop();
+                    var at = Runtime.CurrentInstructionCount;
                     r = driver.Step();
-                    if (driver.LastCompleted is CraftJob) blueprintProbe.ProbeExecuted();
-                    if (driver.LastCompleted == planJob) warmedUp = true;
+                    Measure(at);
+                    lastJob = JobName(driver.LastCompleted ?? driver.Current);
+                    if (driver.LastCompleted == craftJob) blueprintProbe.ProbeExecuted();
                     // A bottle sweep keeps the fast cadence for its whole duration whatever each tick did, but never
                     // bumps movesThisCycle — a sweep is maintenance, so EndCycle's active/idle decision stays driven
                     // by the sort's own moves.
                     var bottleTick = driver.Current is BottleJob || driver.LastCompleted is BottleJob;
+                    var sweep = (driver.LastCompleted ?? driver.Current) as BottleJob;
+                    drySweep = sweep != null && sweep.Dry;
                     if (bottleTick) activelyWorking = backlog = true;
 
                     if (r == StepResult.Fetched)
@@ -567,18 +621,25 @@ namespace IngameScript
                     }
 
                     var sort = driver.LastCompleted as SortJob;
+                    var dryEnd = sort != null && sort.Dry;
+                    if (dryEnd)
+                    {
+                        warmedUp = true;
+                        Log("warmed up +" + (DateTime.UtcNow - startedAt).TotalSeconds.ToString("0") + "s");
+                    }
                     if (sort != null) FinishSort(sort);
                     var bottles = driver.LastCompleted as BottleJob;
                     if (bottles != null) FinishBottles(bottles);
                     // The cycle ends when the queue drains, whichever job happened to be last — a completion handler
                     // that enqueues a follow-up (bottles) keeps the cycle open by construction.
-                    if (driver.LastCompleted != null && !driver.HasWork) EndCycle();
+                    if (driver.LastCompleted != null && !driver.HasWork) EndCycle(dryEnd);
                 }
                 // A method compiles on its first call, so after a start every phase's first step is slow wherever it
                 // lands. Several share a run then: fewer runs over the spike bar, all inside the limiter's startup
-                // allowance. Never past a step that moved items or found a stack to move — one transfer per run.
-                while (starting && driver.HasWork && r != StepResult.Found && r != StepResult.Moved
-                    && r != StepResult.Stalled && r != StepResult.Refilled && Room());
+                // allowance. Never past a step that moved items or found a stack to move — one transfer per run —
+                // except in the dry sweep, whose moves and refills skip the engine call.
+                while (starting && driver.HasWork && (drySweep || r != StepResult.Found && r != StepResult.Moved
+                    && r != StepResult.Stalled && r != StepResult.Refilled) && Room());
 
                 pacer.NotifyCleanRun();
             }
@@ -590,8 +651,7 @@ namespace IngameScript
         }
 
         // Open a fresh cycle: the pooled phase jobs re-arm and queue up. The build's last step enqueues the ledger and
-        // the plan, the plan enqueues the SortJob, and FinishSort queues the bottle sweep when one is armed (a start's
-        // plan queues it ahead of the sort).
+        // the plan, the plan enqueues the SortJob, and FinishSort queues the bottle sweep when one is armed.
         void StartCycle()
         {
             fetchJob.Rearm();
@@ -625,17 +685,17 @@ namespace IngameScript
         // scope; a tagged container that can't teach says why, once.
         void StartLearnSweep(ScanResult scan)
         {
-            learnTeachers.Clear();
-            learnTokens.Clear();
+            learnTeachers.Empty();
+            learnTokens.Empty();
             learnSkips.Begin();
             foreach (var dest in scan.Destinations)
             {
                 string token = null;
                 var count = 0;
                 foreach (var cat in dest.AcceptedCategories) { token = cat; count++; }
-                if (dest.IsCatchAll) learnSkips.Add(dest.Name + ": not a teacher - catch-all");
-                else if (count != 1) learnSkips.Add(dest.Name + ": not a teacher - " + count + " categories");
-                else { learnTeachers.Add(dest); learnTokens.Add(token); }
+                if (dest.IsCatchAll) learnSkips.Push(dest.Name + ": not a teacher - catch-all");
+                else if (count != 1) learnSkips.Push(dest.Name + ": not a teacher - " + count + " categories");
+                else { learnTeachers.Push(dest); learnTokens.Push(token); }
             }
             learnSkips.Commit();
             learnReserves = scan.Reserves;
@@ -652,7 +712,7 @@ namespace IngameScript
             var teachers = learnTeachers.Count;
             if (learnCursor < teachers + learnReserves.Count)
             {
-                itemBuffer.Clear();
+                itemBuffer.Empty();
                 if (learnCursor < teachers)
                 {
                     learnTeachers[learnCursor].Inventory.GetItems(itemBuffer);
@@ -679,7 +739,7 @@ namespace IngameScript
             learner.Finish(categoryOverrides, reservePools);
             foreach (var pool in reservePools.Values) pool.CommitTally();
             learnStates.Begin();
-            foreach (var line in learner.Lines) learnStates.Add(line);
+            foreach (var line in learner.Lines) learnStates.Push(line);
             learnStates.Commit();
             if (learnSaving)
             {
@@ -706,7 +766,11 @@ namespace IngameScript
             Echo(echoText);
         }
 
-        sealed class PhaseJob : IStepJob
+        string JobName(IStepJob job) =>
+            job is SortJob ? "sort" : job is BottleJob ? "bottle" : job is CraftJob ? "craft" : job is LedgerJob ? "ledger"
+            : job == fetchJob ? "fetch" : job == classifyJob ? "scan" : job == buildJob ? "build" : job == planJob ? "plan" : job == learnJob ? "learn" : null;
+
+        class PhaseJob : IStepJob
         {
             readonly Func<bool> body;
             readonly StepResult result;
@@ -733,9 +797,9 @@ namespace IngameScript
 
         void RefreshScope(ManagedScope into)
         {
-            connectorBuffer.Clear();
+            connectorBuffer.Empty();
             GridTerminalSystem.GetBlocksOfType(connectorBuffer);
-            into.Build(connectorBuffer, Me.CubeGrid, Me.OwnerId, factionShare, dockedProduction, dockedFuel);
+            into.Build(connectorBuffer, Me.CubeGrid, Me.OwnerId, On(FactionShare), On(DockedProduction), On(DockedFuel));
         }
 
         // The election runs ahead of the tick's own heavy gate, so its scans take the gate themselves: a cold first
@@ -746,6 +810,7 @@ namespace IngameScript
             if (!pacer.AllowHeavy) return;
             RefreshScope(scope);
             lastTickKind = RunKind.Fetch;
+            lastJob = "scope";
             pacer.NotifyHeavyFired();
         }
 
@@ -753,16 +818,17 @@ namespace IngameScript
         // shrank materially or a construct docked, undocked or was split off — so the jobs stop working from a
         // picture that includes blocks the world no longer has (a small ship's undock is under the shrink bar, yet
         // every transfer to it would fail), and a newly docked ship is picked up without waiting out the pass.
-        // Consumes the tick whenever it counts (one concern per tick) and is attributed to the fetch bucket — the
-        // same calls, at the same cost. A trip drops the work but keeps discovery state, like a stand-down: those
+        // Consumes the tick whenever it counts (one concern per tick, outside a start) and is attributed to the
+        // fetch bucket — the same calls, at the same cost. A trip drops the work but keeps discovery state, like a stand-down: those
         // operations re-validate against every fresh scan, and a vanished machine is already their own recovery path.
         void ProbeScope()
         {
             lastScopeProbeSec = gameSeconds;
-            scopeBuffer.Clear();
+            scopeBuffer.Empty();
             GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(scopeBuffer);
             RefreshScope(probeScope);
             lastTickKind = RunKind.Fetch;
+            lastJob = "scope";
             if (gameSeconds - lastScopeTripSec < ScopeTripCooldownSeconds) return;
             var trip = ScopeShrank(scopeBlocks, scopeBuffer.Count) ? "scope shrank " + scopeBlocks + " to " + scopeBuffer.Count
                      : probeScope.Count != scope.Count ? "docking changed" : null;
@@ -785,18 +851,18 @@ namespace IngameScript
             var managed = scan.Managed;
             if (buildCursor == 0)
             {
-                acceptors.Clear();
-                foreach (var dest in scan.Destinations) acceptors.Add(dest);
-                refineryFeeds.Clear();
-                ledgerKinds.Clear();
-                countPools.Clear();
-                builtAssemblers.Clear();
-                dueOutputs.Clear();
+                acceptors.Empty();
+                foreach (var dest in scan.Destinations) acceptors.Push(dest);
+                refineryFeeds.Empty();
+                ledgerKinds.Empty();
+                countPools.Empty();
+                builtAssemblers.Empty();
+                dueOutputs.Empty();
                 builtSources = 0;
             }
             var end = Math.Min(buildCursor + ClassifyBudget, managed.Count);
-            for (; buildCursor < end; buildCursor++) BuildBlock(managed[buildCursor]);
-            if (buildCursor < managed.Count) return false;
+            for (; buildCursor < end && !full(); buildCursor++) BuildBlock(managed[buildCursor]);
+            if (buildCursor < managed.Count || full()) return false;
             FinishBuild(scan);
             return true;
         }
@@ -815,41 +881,67 @@ namespace IngameScript
             // otherwise close its reason-deficit mid-measure and abort itself with the evidence spent.
             var sampleCommitted = yieldSample.Phase == YieldPhase.Feeding || yieldSample.Phase == YieldPhase.Measuring;
             if (yieldSample.Active && (sampleCommitted || productionLedger.RefineDeficit(yieldSample.Ingot) >= 1.0)
-                && !refinePlanner.NeedYield.Contains(yieldSample.Ore)) refinePlanner.NeedYield.Add(yieldSample.Ore);
+                && !refinePlanner.NeedYield.Contains(yieldSample.Ore)) refinePlanner.NeedYield.Push(yieldSample.Ore);
             // While the sample runs, its ore's blocked lines misread the in-progress learn as a failure: "no
             // refinery" just means the OTHER refineries can't take it, and "need N to learn" fires because the
             // delivered sample sits ledger-protected in the owned refinery's input, leaving loose stock short.
             if (yieldSample.Active) DropStaleYieldLines(yieldSample.Ore);
-            sampleReservedOres.Clear();
-            foreach (var key in refinePlanner.NeedYield) sampleReservedOres.Add(key);
-            foreach (var key in refinePlanner.UnderSampled) sampleReservedOres.Add(key);
-            if (yieldSample.Active) sampleReservedOres.Add(yieldSample.Ore);
+            sampleReservedOres.Empty();
+            foreach (var key in refinePlanner.NeedYield) sampleReservedOres.Push(key);
+            foreach (var key in refinePlanner.UnderSampled) sampleReservedOres.Push(key);
+            if (yieldSample.Active) sampleReservedOres.Push(yieldSample.Ore);
             discovery.Reconcile(craftPlanner.NeedBlueprint, refinePlanner.NeedYield);
             PlanBlueprint();
             PlanYield();
             production.Compose(craftPlanner, refinePlanner, discovery, blueprintProbe, yieldSample, markCheck);
-            // Outranked and warming up: the plan ran for its cold start alone. It queues and writes nothing, and its
-            // discovery claims go, so a later resume plans afresh.
+            // Outranked and warming up: the plan ran for its cold start alone. It queues no real work and writes nothing,
+            // only the dry cycle, and its discovery claims go, so a later resume plans afresh.
             if (leader != null)
             {
                 discovery.Reset();
                 blueprintProbe.Reset();
                 yieldSample.Reset();
+                QueueDryRun();
                 return true;
             }
             PersistTrackedDisassembler();
+            if (QueueDryRun()) return true;
             cycleRouting.Forget();
             if (craftPlanner.Actions.Count > 0)
             {
-                craftJob.Rearm(craftPlanner);
+                craftJob.Rearm(craftPlanner, craftPlanner.Actions);
                 driver.Enqueue(craftJob);
                 activelyWorking = true;
             }
-            // The sweep's first runs are cold paths too, and behind a long first sort pass (a backlog after downtime)
-            // they landed past the limiter's startup allowance.
-            if (starting && bottleTanks != null) QueueBottleSweep();
-            driver.Enqueue(new SortJob(sortSources, cycleRouting, ExamineBudget, sortStart, lapNoRoute, lapUnreachable));
+            driver.Enqueue(new SortJob(sortSources, cycleRouting, ExamineBudget, sortStart, lapNoRoute, lapUnreachable) { Full = full });
             sortPassStartSec = gameSeconds;
+            return true;
+        }
+
+        // A method compiles on its first call, and the work a grid needs may not come up for hours after a start: a
+        // ship docks, a stock runs low, bottles go empty. So the first plan after a compile queues one pass of every
+        // job that moves nothing: each routed target, gas tank and one assembler take an action of every kind with
+        // the engine call skipped, and the config save builds its text without writing it. Real work starts with the
+        // next cycle, from a fresh count, since the dry claims leave the pools' and feeds' counts off for this one.
+        // Returns whether it queued. A dry cycle cut short (a crash, a rescan) is queued once more, then given up, so a
+        // fault in it can't keep real work from ever starting.
+        bool QueueDryRun()
+        {
+            if (warmedUp) return false;
+            if (++dryRuns > 2) { warmedUp = true; return false; }
+            cycleRouting.Forget();
+            dryFlush = true;
+            dryActions.Empty();
+            foreach (var s in ledgerJob.Snapshots)
+            {
+                for (var k = CraftActionKind.AppendAssembly; k <= CraftActionKind.Trim; k++)
+                    dryActions.Push(new CraftAction { Kind = k, Assembler = s.State, Blueprint = "", Amount = 1, Item = "" });
+                break;
+            }
+            dryCraft.Rearm(craftPlanner, dryActions);
+            driver.Enqueue(dryCraft);
+            driver.Enqueue(new BottleJob(sortSources, Stations(classifyCursor.Result.Tanks), ExamineBudget) { Dry = true, Full = full });
+            driver.Enqueue(new SortJob(sortSources, cycleRouting, ExamineBudget, 0, new List<string>(), new List<UnreachableRoute>()) { Dry = true, Full = full });
             return true;
         }
 
@@ -931,7 +1023,7 @@ namespace IngameScript
             ReadInventory(refinery.Input, yieldInput);
             ReadInventory(refinery.Output, yieldOutput);
             double oreInput;
-            yieldInput.TryGetValue(yieldSample.Ore, out oreInput);
+            yieldInput.Get(yieldSample.Ore, out oreInput);
             var learned = yieldSample.Advance(refinery.Block.IsWorking, Total(yieldInput), oreInput, yieldOutput,
                 DiscoverYieldSample, DiscoverYieldFloor, gameSeconds);
             if (!yieldSample.Active)
@@ -979,15 +1071,15 @@ namespace IngameScript
 
         void ReadInventory(IMyInventory inventory, Dictionary<string, double> into)
         {
-            into.Clear();
+            into.Empty();
             if (inventory == null) return;
-            itemBuffer.Clear();
+            itemBuffer.Empty();
             inventory.GetItems(itemBuffer);
             foreach (var item in itemBuffer)
             {
                 var key = ItemKey.Of(item.Type);
                 double amount;
-                into[key] = (into.TryGetValue(key, out amount) ? amount : 0.0) + (double)item.Amount;
+                into[key] = (into.Get(key, out amount) ? amount : 0.0) + (double)item.Amount;
             }
         }
 
@@ -1002,7 +1094,7 @@ namespace IngameScript
         // cost is isolated and followed by a back-off.
         void FetchBlocks()
         {
-            blockBuffer.Clear();
+            blockBuffer.Empty();
             GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(blockBuffer);
         }
 
@@ -1042,6 +1134,7 @@ namespace IngameScript
             logLcd = scan.LogLcd;
             reserveLcds = scan.ReserveLcds;
             stockLcds = scan.StockLcds;
+            lights = scan.Lights;
             BuildBottleSweep(scan.Tanks);
         }
 
@@ -1050,30 +1143,38 @@ namespace IngameScript
         void BuildBottleSweep(List<IMyGasTank> tanks)
         {
             bottleTanks = null;
-            if (bottleSweepMinutes <= 0.0 || secsSinceBottleSweep < bottleSweepMinutes * 60.0 || tanks.Count == 0) return;
-            bottleTanks = new List<IBottleTank>(tanks.Count);
+            if (settings[BottleSweep] <= 0.0 || secsSinceBottleSweep < settings[BottleSweep] * 60.0 || tanks.Count == 0) return;
+            bottleTanks = Stations(tanks);
+            if (bottleTanks.Count == 0) bottleTanks = null;
+        }
+
+        List<IBottleTank> Stations(List<IMyGasTank> tanks)
+        {
+            var stations = new List<IBottleTank>(tanks.Count);
             foreach (var tank in tanks)
             {
                 var inv = tank.GetInventory(0);
-                if (inv != null) bottleTanks.Add(new RefillStation(tank, inv, itemBuffer));
+                if (inv != null) stations.Push(new RefillStation(tank, inv, itemBuffer));
             }
-            if (bottleTanks.Count == 0) bottleTanks = null;
+            return stations;
         }
 
         // A sort pass ended (finished or capped): stamp the due outputs it walked, carry its resume point, commit the
         // lap's diagnostics once every source has been visited, then queue the bottle sweep if one is armed this
         // cycle. The sweep reuses the sort's storage sources, so it rides the same one-transfer/tick budget. (Cycle
-        // end is the scheduler's queue-drained check, not this handler's job.)
+        // end is the scheduler's queue-drained check, not this handler's job.) A dry pass walked without harvesting
+        // anything, so it stamps nothing and keeps the rotation, but commits the lap so that code has run too.
         void FinishSort(SortJob job)
         {
             var n = sortSources.Count;
+            var walked = job.Dry ? 0 : job.SourcesFinished;
             // This pass walked SourcesFinished sources ending just before NextStart, wrapping.
             foreach (var due in dueOutputs)
-                if (((due.Key - job.NextStart + job.SourcesFinished) % n + n) % n < job.SourcesFinished)
+                if (((due.Key - job.NextStart + walked) % n + n) % n < walked)
                     harvestedAt[due.Value] = gameSeconds;
-            sortStart = job.NextStart;
-            lapFinished += job.SourcesFinished;
-            if (lapFinished >= sortSources.Count)
+            if (!job.Dry) sortStart = job.NextStart;
+            lapFinished += walked;
+            if (lapFinished >= sortSources.Count || job.Dry)
             {
                 // Two channels because a missing route already shows on the panel as its category's ──no route──
                 // row (a routed custom category has a row too: its token is an override), so only the unreachables
@@ -1081,31 +1182,25 @@ namespace IngameScript
                 // reports each. Each state is forgotten once a lap stops asserting it, re-firing if it returns.
                 noRouteStates.Begin();
                 unreachableStates.Begin();
-                foreach (var cat in lapNoRoute) noRouteStates.Add("no route for " + cat + " - add [SHEPHERD:" + cat + "]");
+                foreach (var cat in lapNoRoute) noRouteStates.Push("no route for " + cat + " - add [SHEPHERD:" + cat + "]");
                 foreach (var u in lapUnreachable)
-                    unreachableStates.Add("can't reach " + u.Target + " for " + u.Category + " - check conveyor/sorter");
+                    unreachableStates.Push("can't reach " + u.Target + " for " + u.Category + " - check conveyor/sorter");
                 noRouteStates.Commit();
                 unreachableStates.Commit();
                 ResetLap();
             }
-            if (bottleTanks != null && bottleTanks.Count > 0) QueueBottleSweep();
-        }
-
-        void QueueBottleSweep()
-        {
-            driver.Enqueue(new BottleJob(sortSources, bottleTanks, ExamineBudget));
+            if (job.Dry || bottleTanks == null || bottleTanks.Count == 0) return;
+            driver.Enqueue(new BottleJob(sortSources, bottleTanks, ExamineBudget) { Full = full });
             activelyWorking = true;
             Log("refilling bottles (" + bottleTanks.Count + " tank" + (bottleTanks.Count == 1 ? "" : "s") + ")");
         }
 
-        // The sweep is done: surface any stranded tanks, restart the sweep interval.
+        // The sweep is done: surface any stranded tanks, restart the sweep interval — unless it was the dry one.
         void FinishBottles(BottleJob job)
         {
             LogBottleStranded(job.StrandedTanks);
             bottleTanks = null;
-            secsSinceBottleSweep = 0.0;
-            // A start's sweep runs ahead of the sort, so the sort pass's time cap starts when the sweep ends.
-            sortPassStartSec = gameSeconds;
+            if (!job.Dry) secsSinceBottleSweep = 0.0;
         }
 
         // Log a refill tank the first time the Drain pass can't return its bottles to storage; cleared once a
@@ -1114,18 +1209,19 @@ namespace IngameScript
         {
             bottleStates.Begin();
             foreach (var name in current)
-                bottleStates.Add("bottles stuck in " + name + " - storage full/unreachable");
+                bottleStates.Push("bottles stuck in " + name + " - storage full/unreachable");
             bottleStates.Commit();
         }
 
         // A cycle drained: only a backlog's worth of moves keeps the fast cadence for the next one (more of it may
         // be waiting); a trickle or a clean pass settles to the idle cadence, which keeps up with a trickle.
-        void EndCycle()
+        // The dry cycle moves nothing either, and the real first cycle after it should run as eagerly as a start.
+        void EndCycle(bool eager)
         {
             cycleCount++;
-            activelyWorking = movesThisCycle > 0 || learnMode;
+            activelyWorking = movesThisCycle > 0 || learnMode || eager;
             // A learn sweep moves nothing, yet the preview should follow the user's rearranging promptly.
-            backlog = movesThisCycle >= BacklogMoves || learnMode;
+            backlog = movesThisCycle >= BacklogMoves || learnMode || eager;
         }
 
         // The Advanced PB Limiter calls Main with GracefulShutDown:: right before it would punish us. Stand down
@@ -1148,7 +1244,7 @@ namespace IngameScript
         bool StandingBy()
         {
             var grid = Me.CubeGrid;
-            var rank = PeerElection.Rank(leadPriority, grid.IsStatic, grid.GridSizeEnum == MyCubeSize.Large, pacer.Halted);
+            var rank = PeerElection.Rank((int)settings[Priority], grid.IsStatic, grid.GridSizeEnum == MyCubeSize.Large, pacer.Halted);
             // Before the first fetch the scope is empty and would drop every peer heard, so a PB compiled while docked
             // would lead the whole docked group until the next heartbeat.
             if (scope.Count == 0) ScanScopeAsHeavy();
@@ -1168,6 +1264,7 @@ namespace IngameScript
             }
             if (election.TakeHeartbeat(gameSeconds))
             {
+                lastBeat = true;
                 IGC.SendBroadcastMessage(LeadChannel, new MyTuple<long, long, string>(rank, Me.EntityId, Me.CustomName + " on " + grid.CustomName), LeadRange);
                 // A standing-by PB fetches nothing, so this is how it notices a split or an undock that frees it. A
                 // warming one is mid-cycle, whose classify reads the scope and whose own probe watches the connectors.
@@ -1183,8 +1280,8 @@ namespace IngameScript
                 }
                 Log(lead != null ? "standing by - " + lead + " leads" : "resuming - no higher-priority SHEPHERD");
                 leader = lead;
-                standbyLines.Clear();
-                if (lead != null) standbyLines.Add(lead + " leads");
+                standbyLines.Empty();
+                if (lead != null) standbyLines.Push(lead + " leads");
                 BuildEcho(null);
             }
             return leader != null;
@@ -1221,8 +1318,8 @@ namespace IngameScript
 
         void ResetLap()
         {
-            lapNoRoute.Clear();
-            lapUnreachable.Clear();
+            lapNoRoute.Empty();
+            lapUnreachable.Empty();
             lapFinished = 0;
         }
 
@@ -1231,12 +1328,12 @@ namespace IngameScript
         void Log(string message)
         {
             var line = Clock.HmsCentis(CurrentTime()) + " " + message;
-            messageLog.Add(line);
+            messageLog.Push(line);
         }
 
         // DateTime.UtcNow (no local time zone on a server) shifted by utcOffsetHours. Read live at each use, so
         // the status clock and the log stamps share one source. Display only — never gates a sort/pace decision.
-        DateTime CurrentTime() => DateTime.UtcNow.AddHours(utcOffsetHours);
+        DateTime CurrentTime() => DateTime.UtcNow.AddHours(settings[UtcOffset]);
 
         // A step threw. Never fast-loop a crashing step: drop the whole in-flight cycle (a fresh scan rebuilds
         // next cycle), arm the breaker back-off, and log. Repeated crashes with no clean run between park us;
@@ -1265,31 +1362,16 @@ namespace IngameScript
         // managed-section signature so a later FlushConfig with no model change is a no-op. Returns a short summary.
         string ReloadConfig()
         {
-            reservePools.Clear();
-            reserveFillPools.Clear();
-            reserveFills.Clear();
+            reservePools.Empty();
+            reserveFillPools.Empty();
+            reserveFills.Empty();
             categoryOverrides.Clear();
             productionFacts.ClearLearned();
             craftPlanner.TrackedDisassembler = 0;
             persistedDisassembler = 0;
             lastFlushSignature = "";
-            leadPriority = 0;
-            factionShare = dockedProduction = dockedFuel = false;
-            peakMs = Pacer.DefaultPeakMs;
-            parkSim = Pacer.DefaultParkSim;
-            resumeSim = Pacer.DefaultResumeSim;
-            backoffSim = Pacer.DefaultBackoffSim;
-            spikeMs = Pacer.DefaultSpikeMs;
-            spikeWindowSeconds = Pacer.DefaultSpikeWindowSec;
-            startupSeconds = DefaultStartupSeconds;
-            pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
-            pacer.SetSpike(spikeMs, spikeWindowSeconds);
-            utcOffsetHours = 0;
-            reactorFillPct = 15;
-            gasGenFillPct = 50;
-            refineryFillPct = 30;
-            bottleSweepMinutes = 3;
-            sortPassSeconds = 60;
+            for (var i = 0; i < settings.Length; i++) settings[i] = SettingRules[3 * i + 2];
+            ApplyPacerSettings();
             var cd = Me.CustomData;
             // A fresh PB has empty Custom Data, which MyIni rejects — that is not an error, just "no config yet",
             // so say so plainly; the save tick then writes the settings with their defaults.
@@ -1334,10 +1416,10 @@ namespace IngameScript
                         // never disassembled). The quota still loads — its move semantics stay valid.
                         if (q.AutomaticProduction)
                         {
-                            if (key.StartsWith("Ore/", StringComparison.Ordinal))
-                                quotaStates.Add("A inert on " + key + " - can't produce ore");
-                            else if (q.Mode == QuotaMode.Limit && key.StartsWith("Ingot/", StringComparison.Ordinal))
-                                quotaStates.Add("A inert on " + key + "L - ingots never disassemble");
+                            if (key.Starts("Ore/"))
+                                quotaStates.Push("A inert on " + key + " - can't produce ore");
+                            else if (q.Mode == QuotaMode.Limit && key.Starts("Ingot/"))
+                                quotaStates.Push("A inert on " + key + "L - ingots never disassemble");
                         }
                     }
                     else Log("bad quota '" + pair.Key + "=" + pair.Value + "' in [" + section + "]");
@@ -1357,38 +1439,25 @@ namespace IngameScript
             // fill of 0 switches something off — a typo must never do that.
             foreach (var pair in store.ReadSection(SettingsSection))
             {
-                var key = pair.Key;
-                var val = pair.Value;
-                bool ok;
-                if (key == PriorityKey) ok = int.TryParse(val, out leadPriority);
-                else if (key == FactionShareKey) ok = bool.TryParse(val, out factionShare);
-                else if (key == DockedProductionKey) ok = bool.TryParse(val, out dockedProduction);
-                else if (key == DockedFuelKey) ok = bool.TryParse(val, out dockedFuel);
-                else if (key == PeakMsKey) ok = InRange(val, 0.001, 1000.0, ref peakMs);
-                else if (key == ParkSimKey) ok = InRange(val, 0.0, 0.99, ref parkSim);
-                else if (key == ResumeSimKey) ok = InRange(val, 0.0, 1.0, ref resumeSim);
-                else if (key == BackoffSimKey) ok = InRange(val, 0.0, 1.0, ref backoffSim);
-                else if (key == SpikeMsKey) ok = InRange(val, 0.001, 1000.0, ref spikeMs);
-                else if (key == SpikeWindowKey) ok = InRange(val, 0.0, 1e6, ref spikeWindowSeconds);
-                else if (key == StartupKey) ok = InRange(val, 0.0, 1e6, ref startupSeconds);
-                else if (key == UtcOffsetKey) ok = InRange(val, -14.0, 14.0, ref utcOffsetHours);
-                else if (key == ReactorFillKey) ok = InRange(val, 0.0, 100.0, ref reactorFillPct);
-                else if (key == GasGenFillKey) ok = InRange(val, 0.0, 100.0, ref gasGenFillPct);
-                else if (key == RefineryFillKey) ok = InRange(val, 0.0, 100.0, ref refineryFillPct);
-                else if (key == BottleSweepKey) ok = InRange(val, 0.0, 1e6, ref bottleSweepMinutes);
-                else if (key == SortPassKey) ok = InRange(val, 0.0, 1e6, ref sortPassSeconds);
-                else { Log("unknown setting '" + key + "' in [" + SettingsSection + "]"); continue; }
-                if (!ok) Log("bad setting '" + key + "=" + val + "' in [" + SettingsSection + "]");
+                var i = Array.IndexOf(SettingKeys, pair.Key);
+                if (i < 0) { Log("unknown setting '" + pair.Key + "' in [" + SettingsSection + "]"); continue; }
+                var n = 0;
+                var b = false;
+                var v = 0.0;
+                var ok = i == Priority ? int.TryParse(pair.Value, out n)
+                    : IsSwitch(i) ? bool.TryParse(pair.Value, out b)
+                    : double.TryParse(pair.Value, out v) && v >= SettingRules[3 * i] && v <= SettingRules[3 * i + 1];
+                if (ok) settings[i] = i == Priority ? n : IsSwitch(i) ? (b ? 1 : 0) : v;
+                else Log("bad setting '" + pair.Key + "=" + pair.Value + "' in [" + SettingsSection + "]");
             }
             // Resuming below the park bar would let one sample park and the next resume, round and round.
-            if (resumeSim < parkSim)
+            if (settings[ResumeSim] < settings[ParkSim])
             {
                 Log("resumeSim below parkSim in [" + SettingsSection + "] - both default");
-                parkSim = Pacer.DefaultParkSim;
-                resumeSim = Pacer.DefaultResumeSim;
+                settings[ParkSim] = Pacer.DefaultParkSim;
+                settings[ResumeSim] = Pacer.DefaultResumeSim;
             }
-            pacer.SetBars(stats.BarMs = peakMs, parkSim, resumeSim, backoffSim);
-            pacer.SetSpike(spikeMs, spikeWindowSeconds);
+            ApplyPacerSettings();
             // Only asks: this document is discarded, and the write rides the save tick like every other flush.
             SettingsEntries();
             if (store.AddMissing(SettingsSection, settingsEntries)) fillSettings = flushPending = true;
@@ -1422,19 +1491,23 @@ namespace IngameScript
             return "reloaded " + reservePools.Count + " pool" + (reservePools.Count == 1 ? "" : "s")
                  + ", " + quotaCount + " quotas, " + overrideCount + " overrides, " + factCount + " facts"
                  // Said outright, since a setting that didn't take shows only as behaviour that didn't change.
-                 + "\npriority " + leadPriority + (factionShare ? ", factionShare" : "") + (dockedProduction ? ", dockedProduction" : "") + (dockedFuel ? ", dockedFuel" : "")
-                 + "\npeakMs " + peakMs + ", parkSim " + parkSim + ", resumeSim " + resumeSim + ", backoffSim " + backoffSim
-                 + "\nspikeMs " + spikeMs + ", spikeWindowSeconds " + spikeWindowSeconds + ", startupSeconds " + startupSeconds
-                 + "\nfill % " + reactorFillPct + "/" + gasGenFillPct + "/" + refineryFillPct
-                 + ", bottles " + bottleSweepMinutes + " min, pass " + sortPassSeconds + " s, UTC" + (utcOffsetHours < 0 ? "" : "+") + utcOffsetHours;
+                 + "\npriority " + settings[Priority] + (On(FactionShare) ? ", factionShare" : "") + (On(DockedProduction) ? ", dockedProduction" : "")
+                 + (On(DockedFuel) ? ", dockedFuel" : "")
+                 + "\npeakMs " + settings[PeakMs] + ", parkSim " + settings[ParkSim] + ", resumeSim " + settings[ResumeSim]
+                 + ", backoffSim " + settings[BackoffSim]
+                 + "\nspikeMs " + settings[SpikeMs] + ", spikeWindowSeconds " + settings[SpikeWindow] + ", startupSeconds " + settings[Startup]
+                 + "\nfill % " + settings[ReactorFill] + "/" + settings[GasGenFill] + "/" + settings[RefineryFill]
+                 + ", bottles " + settings[BottleSweep] + " min, pass " + settings[SortPass] + " s, UTC" + (settings[UtcOffset] < 0 ? "" : "+") + settings[UtcOffset];
         }
 
-        static bool InRange(string text, double lo, double hi, ref double into)
+        static bool IsSwitch(int setting) => setting > Priority && setting <= DockedFuel;
+
+        bool On(int setting) => settings[setting] != 0;
+
+        void ApplyPacerSettings()
         {
-            double v;
-            if (!double.TryParse(text, out v) || v < lo || v > hi) return false;
-            into = v;
-            return true;
+            pacer.SetBars(stats.BarMs = settings[PeakMs], settings[ParkSim], settings[ResumeSim], settings[BackoffSim]);
+            pacer.SetSpike(settings[SpikeMs], settings[SpikeWindow]);
         }
 
         // The one writer of Me.CustomData: re-parse the live document (preserving the user's hand-authored sections
@@ -1442,19 +1515,20 @@ namespace IngameScript
         // the managed set actually changed (dirty-gated on the signature). Its callers fire only on a change edge (a
         // learned fact, the tracked disassembler acquired or released), because the re-parse and re-serialize scale
         // with the whole Custom Data. A genuine parse failure aborts rather than clobbering the user's file.
-        void FlushConfig()
+        // Dry builds the text and writes and remembers nothing.
+        void FlushConfig(bool dry)
         {
             var doc = new MyIniDocument();
             string error;
             if (!doc.TryParse(Me.CustomData, out error)) { Log("can't save config: " + error); return; }
             var store = new ConfigStore(doc, CategoriesSection, ProductionSection, RecipesSection, YieldsSection);
-            var learned = learnCommit;
+            var learned = learnCommit && !dry;
             // The override map changes only on leaving learn mode; rewriting it at any other flush would delete lines
             // added since the last reload — a hand edit, or another program's — before configReload could read them.
             if (learned) store.MergeSection(CategoriesSection, categoryOverrides.Entries);
-            productionEntries.Clear();
+            productionEntries.Empty();
             if (persistedDisassembler != 0)
-                productionEntries.Add(new KeyValuePair<string, string>(DisassemblerKey, persistedDisassembler.ToString()));
+                productionEntries.Push(new KeyValuePair<string, string>(DisassemblerKey, persistedDisassembler.ToString()));
             store.MergeSection(ProductionSection, productionEntries);
             productionFacts.RecipeEntries(productionEntries);
             store.MergeSection(RecipesSection, productionEntries);
@@ -1462,11 +1536,12 @@ namespace IngameScript
             store.MergeSection(YieldsSection, productionEntries);
             // The signature covers only the managed sections, so learned reserve lines force the write.
             if (learned) foreach (var line in learner.QuotaLines) store.SetItem(line.Section, line.Key, line.Value);
-            learnCommit = false;
+            if (!dry) learnCommit = false;
             SettingsEntries();
-            var filled = fillSettings && store.AddMissing(SettingsSection, settingsEntries);
-            fillSettings = false;
+            var filled = (fillSettings || dry) && store.AddMissing(SettingsSection, settingsEntries);
+            if (!dry) fillSettings = false;
             var signature = store.Signature();
+            if (dry) { store.ToText(); return; }
             if (signature == lastFlushSignature && !learned && !filled) return;
             Me.CustomData = store.ToText();
             lastFlushSignature = signature;
@@ -1476,29 +1551,11 @@ namespace IngameScript
         // user left out, so what lands in Custom Data is each one's default.
         void SettingsEntries()
         {
-            settingsEntries.Clear();
-            Setting(UtcOffsetKey, utcOffsetHours);
-            Setting(ReactorFillKey, reactorFillPct);
-            Setting(GasGenFillKey, gasGenFillPct);
-            Setting(RefineryFillKey, refineryFillPct);
-            Setting(BottleSweepKey, bottleSweepMinutes);
-            Setting(SortPassKey, sortPassSeconds);
-            Setting(PriorityKey, leadPriority);
-            Setting(FactionShareKey, factionShare);
-            Setting(DockedProductionKey, dockedProduction);
-            Setting(DockedFuelKey, dockedFuel);
-            Setting(PeakMsKey, peakMs);
-            Setting(ParkSimKey, parkSim);
-            Setting(ResumeSimKey, resumeSim);
-            Setting(BackoffSimKey, backoffSim);
-            Setting(SpikeMsKey, spikeMs);
-            Setting(SpikeWindowKey, spikeWindowSeconds);
-            Setting(StartupKey, startupSeconds);
+            settingsEntries.Empty();
+            for (var i = 0; i < settings.Length; i++)
+                // bool.ToString() is "False"; the guide and the parser's examples use lower case.
+                settingsEntries.Push(new KeyValuePair<string, string>(SettingKeys[i], IsSwitch(i) ? (On(i) ? "true" : "false") : settings[i].ToString()));
         }
-
-        // bool.ToString() is "False"; the guide and the parser's examples use lower case.
-        void Setting(string key, object value) =>
-            settingsEntries.Add(new KeyValuePair<string, string>(key, value is bool ? ((bool)value ? "true" : "false") : value.ToString()));
 
         // A [Reserve] section maps to the default pool (""), [Reserve:Name] to that named pool. The "Reserve"
         // keyword is matched case-insensitively; the name after ':' is verbatim (it must equal the tag's pool). A
@@ -1506,17 +1563,17 @@ namespace IngameScript
         static bool TryReservePool(string section, out string pool)
         {
             pool = null;
-            if (section == null || !section.StartsWith("Reserve", StringComparison.OrdinalIgnoreCase)) return false;
-            var after = section.Substring("Reserve".Length);
+            if (section == null || !section.StartsAnyCase("Reserve")) return false;
+            var after = section.Cut("Reserve".Length);
             if (after.Length == 0) { pool = ""; return true; }
-            if (after[0] == ':') { pool = after.Substring(1); return true; }
+            if (after[0] == ':') { pool = after.Cut(1); return true; }
             return false;
         }
 
         ReservePool GetOrAddPool(string name)
         {
             ReservePool pool;
-            if (!reservePools.TryGetValue(name, out pool)) { pool = new ReservePool(name); reservePools[name] = pool; }
+            if (!reservePools.Get(name, out pool)) { pool = new ReservePool(name); reservePools[name] = pool; }
             return pool;
         }
 
@@ -1524,13 +1581,13 @@ namespace IngameScript
         // (the only time the pool set changes), so a status render just refills fractions and never allocates.
         void RebuildReserveFillEntries()
         {
-            reserveFillPools.Clear();
-            reserveFills.Clear();
+            reserveFillPools.Empty();
+            reserveFills.Empty();
             foreach (var pool in reservePools.Values)
             {
                 if (pool.QuotaCount == 0) continue;
-                reserveFillPools.Add(pool);
-                reserveFills.Add(new CategoryFill(ReservePool.Label(pool.Name)));
+                reserveFillPools.Push(pool);
+                reserveFills.Push(new CategoryFill(ReservePool.Label(pool.Name)));
             }
         }
 
@@ -1538,11 +1595,14 @@ namespace IngameScript
         // Echo pane once per run (SE clears it each run, and every Echo in a run appends) — only the STABLE welcome
         // banner, never the live profiler/log (those change every run and flash unreadably at Update1; their home is
         // the LCDs).
+        static readonly string[] Panels = { "status", "debug", "log", "levels", "stock" };
+
         void RenderTick()
         {
             var levels = 3 + (reserveLcds?.Count ?? 0);
             var panels = levels + (stockLcds?.Count ?? 0);
             if (renderCursor >= panels) renderCursor = 0; // the scan dropped an LCD since the last render
+            lastPanel = Panels[renderCursor < 3 ? renderCursor : renderCursor < levels ? 3 : 4];
             if (renderCursor == 0) RenderStatusLcd();
             else if (renderCursor == 1) RenderDebugLcd();
             else if (renderCursor == 2) RenderLogLcd();
@@ -1562,11 +1622,11 @@ namespace IngameScript
             {
                 stockStale = false;
                 productionLedger.CollectKeys(stockKeys);
-                stockKeys.Sort(StringComparer.Ordinal);
-                stockCategories.Clear();
-                foreach (var key in stockKeys) stockCategories.Add(Category.ForKey(key, categoryOverrides));
+                stockKeys.SortOrdinal();
+                stockCategories.Empty();
+                foreach (var key in stockKeys) stockCategories.Push(Category.ForKey(key, categoryOverrides));
             }
-            renderBuffer.Clear();
+            renderBuffer.Empty();
             foreach (var category in lcd.AcceptedCategories)
                 LevelsView.Render(renderBuffer, category, stockKeys, stockCategories, productionLedger);
             if (lcd.IsCatchAll) LevelsView.Render(renderBuffer, null, stockKeys, stockCategories, productionLedger);
@@ -1577,11 +1637,11 @@ namespace IngameScript
         // names — so a bare tag means the default pool, never every pool (the status panel is the all-pools view).
         void RenderLevelsLcd(ReserveContainer lcd)
         {
-            renderBuffer.Clear();
+            renderBuffer.Empty();
             ReservePool pool;
-            if (reservePools.TryGetValue(lcd.Pool, out pool) && (pool.QuotaCount > 0 || pool.Containers > 0))
+            if (reservePools.Get(lcd.Pool, out pool) && (pool.QuotaCount > 0 || pool.Containers > 0))
                 LevelsView.Render(renderBuffer, pool);
-            else renderBuffer.Append(ReservePool.Label(lcd.Pool)).Append(" · no quotas, no container");
+            else renderBuffer.Put(ReservePool.Label(lcd.Pool)).Put(" · no quotas, no container");
             WriteSurface(lcd.Block, renderBuffer.ToString(), true);
         }
 
@@ -1594,8 +1654,10 @@ namespace IngameScript
         void RenderStandingBy()
         {
             renderCursor = renderCursor >= 2 ? 0 : renderCursor + 1;
+            lastPanel = Panels[renderCursor];
             if (renderCursor == 1) { RenderDebugLcd(); return; }
             if (renderCursor == 2) { RenderLogLcd(); return; }
+            PaintLights(Color.Lime);
             if (statusLcd == null) return;
             StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, "standing by", Clock.Hms(CurrentTime()), null, null, standbyMessages);
             WriteSurface(statusLcd, renderBuffer.ToString(), true);
@@ -1613,8 +1675,11 @@ namespace IngameScript
             WriteSurface(debugLcd, renderBuffer.ToString(), true); // monospace → the table columns line up
         }
 
-        string DebugState() =>
-            leader != null ? "standing by" : pacer.Halted ? "HALTED" : learnMode ? "learning" : pacer.Throttled ? "THROTTLED" : activelyWorking ? "working" : "idle";
+        string DebugState() => leader != null ? "standing by" : Health(true);
+
+        // THROTTLED stays off the status panel — a breach back-off is common and expected (mostly limiter-dropped GC stalls), so it would just be noise there.
+        string Health(bool debug) =>
+            pacer.Halted ? "HALTED" : learnMode ? "learning" : debug && pacer.Throttled ? "THROTTLED" : activelyWorking ? "working" : "idle";
 
         // The wake rate currently in effect. Paired with the state word: THROTTLED U10 = a breach back-off, the sim
         // park's wary stage (the thr/wary shares tell which), a spike hold or a stand-down; THROTTLED U100 = a full
@@ -1644,15 +1709,31 @@ namespace IngameScript
         // quota model. Runtime numbers stay on DEBUG.
         void RenderStatusLcd()
         {
+            PaintLights(pacer.Halted || pacer.StandingDown ? Color.Red : learnMode || NeedsReading() ? Color.Yellow : Color.Lime);
             if (statusLcd == null) return;
             BuildCategoryFills();
             BuildReserveFills();
-            // THROTTLED is deliberately NOT surfaced here — a breach back-off is common and expected (mostly
-            // limiter-dropped GC stalls), so it would just be noise; it stays on [SHEPHERD-DEBUG].
-            var health = pacer.Halted ? "HALTED" : learnMode ? "learning" : activelyWorking ? "working" : "idle";
-            StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, health, Clock.Hms(CurrentTime()), categoryFills, reserveFills, statusMessages,
+            StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, Health(false), Clock.Hms(CurrentTime()), categoryFills, reserveFills, statusMessages,
                 markCheck.Controlled, craftPlanner.TrackedDisassembler != 0);
             WriteSurface(statusLcd, renderBuffer.ToString(), true);
+        }
+
+        // The [SHEPHERD] lights carry the status panel's verdict across a base: red when the owner must act, yellow
+        // while nothing moves on purpose or the panel lists a state line. Write-on-change, as Color syncs to every
+        // client. A PB that stops running can't paint, so its lights keep their last colour.
+        void PaintLights(Color colour)
+        {
+            if (lights != null)
+                foreach (var light in lights)
+                    if (light.Color != colour) light.Color = colour;
+        }
+
+        // Crafting and refining lines are the panel's normal work, not something to read.
+        bool NeedsReading()
+        {
+            foreach (var lines in statusMessages)
+                if (lines != production.Actions && lines.Count > 0) return true;
+            return false;
         }
 
         // Aggregate each category's fill across the containers that accept it: explicit acceptors if any, else a
@@ -1701,18 +1782,18 @@ namespace IngameScript
         // containers never reshuffles the panel.
         void RebuildCategoryRows()
         {
-            customCategories.Clear();
+            customCategories.Empty();
             if (destinations != null)
                 foreach (var dest in destinations)
                     foreach (var cat in dest.AcceptedCategories) Categories.AddCustom(customCategories, cat);
             foreach (var pair in categoryOverrides.Entries) Categories.AddCustom(customCategories, pair.Value);
-            customCategories.Sort(StringComparer.Ordinal);
+            customCategories.SortOrdinal();
             var builtIns = Categories.All.Length;
             categoryFills.RemoveRange(builtIns, categoryFills.Count - builtIns);
-            foreach (var cat in customCategories) categoryFills.Add(new CategoryFill(cat));
+            foreach (var cat in customCategories) categoryFills.Push(new CategoryFill(cat));
             if (destinations != null)
                 foreach (var dest in destinations)
-                    if (dest.IsCatchAll) { categoryFills.Add(catchAllRow); break; }
+                    if (dest.IsCatchAll) { categoryFills.Push(catchAllRow); break; }
         }
 
         // Refill each shown pool's quota fill (have/want; may exceed 1 when over-stocked). HasRoute=false marks a
@@ -1791,13 +1872,13 @@ namespace IngameScript
                 if (outMode == DrainMode.All)
                 {
                     double at;
-                    if (harvestedAt.TryGetValue(id, out at) && gameSeconds - at < HarvestSeconds) outMode = DrainMode.ToDemand;
+                    if (harvestedAt.Get(id, out at) && gameSeconds - at < HarvestSeconds) outMode = DrainMode.ToDemand;
                     else dueOutputs[builtSources] = id;
                 }
                 AddSource(mb.Output, outMode, null, LedgerKind.Plain, null);
             }
             var assembler = mb.Block as IMyAssembler;
-            if (assembler != null) builtAssemblers.Add(new AssemblerState(assembler, mb.Construct, mb.Mark, productionQueueBuffer, itemBuffer, upgradeBuffer));
+            if (assembler != null) builtAssemblers.Push(new AssemblerState(assembler, mb.Construct, mb.Mark, productionQueueBuffer, itemBuffer, upgradeBuffer));
         }
 
         // A demand-first MachineFeed for a fed machine (reactor / gas generator / refinery) with a fill target above
@@ -1824,8 +1905,8 @@ namespace IngameScript
             var feed = new MachineFeed(mb.Input, mb.Block.EntityId, mb.Block.CustomName, category, target,
                 kind == FeedKind.Refinery ? openRefineryTakes : null);
             if (learning) yieldSample.Bind(feed);
-            acceptors.Add(feed);
-            if (kind == FeedKind.Refinery) refineryFeeds.Add(feed);
+            acceptors.Push(feed);
+            if (kind == FeedKind.Refinery) refineryFeeds.Push(feed);
         }
 
         // The sortSources list is itself the pool: rebind the instances we already have and only allocate for the
@@ -1833,10 +1914,10 @@ namespace IngameScript
         void AddSource(IMyInventory inventory, DrainMode mode, ReservePool drainPool, LedgerKind kind, ReservePool countPool)
         {
             if (builtSources < sortSources.Count) ((InventorySource)sortSources[builtSources]).Rebind(inventory, mode, drainPool);
-            else sortSources.Add(new InventorySource(inventory, itemBuffer, mode, drainPool, categoryOverrides));
+            else sortSources.Push(new InventorySource(inventory, itemBuffer, mode, drainPool, categoryOverrides));
             builtSources++;
-            ledgerKinds.Add(kind);
-            countPools.Add(countPool);
+            ledgerKinds.Push(kind);
+            countPools.Push(countPool);
         }
 
         // Add one demand-first ReserveIntake per reserve container whose pool has quotas. The intake ranks in the
@@ -1848,14 +1929,14 @@ namespace IngameScript
             reserveStates.Begin();
             shipPoolStates.Begin();
             foreach (var pool in reservePools.Values) pool.Containers = 0;
-            homePools.Clear();
+            homePools.Empty();
             foreach (var reserve in scan.Reserves)
             {
-                if (reserve.DualRole) reserveStates.Add(reserve.Block.CustomName + ": reserve ignores its [SHEPHERD:] tag");
+                if (reserve.DualRole) reserveStates.Push(reserve.Block.CustomName + ": reserve ignores its [SHEPHERD:] tag");
                 var pool = GetOrAddPool(reserve.Pool);
                 pool.Containers++;
-                if (!reserve.Docked) homePools.Add(reserve.Pool);
-                if (pool.QuotaCount > 0) acceptors.Add(new ReserveIntake(reserve.Inventory, pool, reserve.Block.CustomName));
+                if (!reserve.Docked) homePools.Push(reserve.Pool);
+                if (pool.QuotaCount > 0) acceptors.Push(new ReserveIntake(reserve.Inventory, pool, reserve.Block.CustomName));
             }
 
             // A ship's pool is the ship's business: unconfigured here, its docked containers are simply kept whole, and
@@ -1864,9 +1945,9 @@ namespace IngameScript
             foreach (var pool in reservePools.Values)
             {
                 if (pool.Containers > 0 && pool.QuotaCount == 0)
-                    (homePools.Contains(pool.Name) ? reserveStates : shipPoolStates).Add("reserve " + ReservePool.Label(pool.Name) + " has no quota section");
+                    (homePools.Contains(pool.Name) ? reserveStates : shipPoolStates).Push("reserve " + ReservePool.Label(pool.Name) + " has no quota section");
                 else if (pool.QuotaCount > 0 && pool.Containers == 0 && !pool.AllAutomatic())
-                    (pool.Docked ? shipPoolStates : reserveStates).Add("reserve " + ReservePool.Label(pool.Name) + " quotas unused - no container");
+                    (pool.Docked ? shipPoolStates : reserveStates).Push("reserve " + ReservePool.Label(pool.Name) + " quotas unused - no container");
             }
             ReservePool.SharedAll(reservePools, allFirstPool, reserveStates);
             reserveStates.Commit();
@@ -1874,9 +1955,9 @@ namespace IngameScript
         }
 
         double FillPctFor(FeedKind kind) =>
-            kind == FeedKind.Reactor ? reactorFillPct
-          : kind == FeedKind.GasGen ? gasGenFillPct
-          : refineryFillPct;
+            kind == FeedKind.Reactor ? settings[ReactorFill]
+          : kind == FeedKind.GasGen ? settings[GasGenFill]
+          : settings[RefineryFill];
 
         // A fed machine's input contents are spoken for (protected from disassembly surplus); a working refinery's
         // input ore additionally counts as expected ingot output. Assemblers and plain storage tally as ordinary
@@ -1891,7 +1972,7 @@ namespace IngameScript
     // The live IIniDocument over MyIni. Trivial by design — its correctness is by inspection, while the merge
     // logic it backs is unit-tested game-free (ConfigStore/Persist.cs). Empty or blank text parses to an empty
     // document (MyIni rejects empty, but the first-ever write must start from a blank doc to Set into).
-    public sealed class MyIniDocument : IIniDocument
+    public class MyIniDocument : IIniDocument
     {
         readonly MyIni ini = new MyIni();
         readonly List<MyIniKey> keyScratch = new List<MyIniKey>();
@@ -1910,9 +1991,9 @@ namespace IngameScript
 
         public void KeyNames(string section, List<string> into)
         {
-            keyScratch.Clear();
+            keyScratch.Empty();
             ini.GetKeys(section, keyScratch);
-            foreach (var key in keyScratch) into.Add(key.Name);
+            foreach (var key in keyScratch) into.Push(key.Name);
         }
 
         public string Get(string section, string key)

@@ -25,7 +25,7 @@ namespace IngameScript
     // The driver never touches pacing or game state — the scheduler maps each StepResult to run kinds and Pacer
     // calls, and inspects LastCompleted to run a finished job's completion handling (diagnostics, enqueueing the
     // next phase). A job finishing on a tick does NOT start the next job that same tick (one concern per tick).
-    public sealed class CycleDriver
+    public class CycleDriver
     {
         readonly List<IStepJob> queue = new List<IStepJob>();
         IStepJob current;
@@ -34,20 +34,20 @@ namespace IngameScript
 
         // The job that finished on the most recent Step; cleared by the next Step, so completion handling runs
         // exactly once, on the tick the job finished.
-        public IStepJob LastCompleted { get; private set; }
+        public IStepJob LastCompleted;
 
         public bool HasWork => current != null || queue.Count > 0;
 
         public void Enqueue(IStepJob job)
         {
-            if (job != null) queue.Add(job);
+            if (job != null) queue.Push(job);
         }
 
         // Drop everything mid-cycle (crash / stand-down); the next cycle starts from a fresh enqueue.
         public void Clear()
         {
             current = null;
-            queue.Clear();
+            queue.Empty();
             LastCompleted = null;
         }
 

@@ -160,7 +160,7 @@ namespace SHEPHERD.Tests
         public void LearnYieldStoresAndSetsDirty()
         {
             var facts = new ProductionFacts();
-            facts.LearnYield("Ore/Modium", new List<OreYield> { new OreYield("Ingot/Modium", 0.25) });
+            facts.LearnYield("Ore/Modium", new List<OreYield> { new OreYield { Output = "Ingot/Modium", Ratio = 0.25 } });
             List<OreYield> outputs;
             Assert.True(facts.TryYields("Ore/Modium", out outputs));
             Assert.Equal(0.25, outputs[0].Ratio);
@@ -232,9 +232,9 @@ namespace SHEPHERD.Tests
             Assert.True(facts.TakeDirty());
             facts.Learn("Component/ModAlloy", "ModAlloyBlueprint");
             Assert.False(facts.TakeDirty());
-            facts.LearnYield("Ore/Modium", new List<OreYield> { new OreYield("Ingot/Modium", 0.25) });
+            facts.LearnYield("Ore/Modium", new List<OreYield> { new OreYield { Output = "Ingot/Modium", Ratio = 0.25 } });
             Assert.True(facts.TakeDirty());
-            facts.LearnYield("Ore/Modium", new List<OreYield> { new OreYield("Ingot/Modium", 0.25) });
+            facts.LearnYield("Ore/Modium", new List<OreYield> { new OreYield { Output = "Ingot/Modium", Ratio = 0.25 } });
             Assert.False(facts.TakeDirty());
         }
     }

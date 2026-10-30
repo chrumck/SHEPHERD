@@ -125,7 +125,7 @@ namespace SHEPHERD.Tests
             h.FailFetch = true;
             h.TickUntil(() => h.Echo.Contains("standing by"));
             Assert.Contains("Backup PB on Base leads", h.Echo);
-            Assert.Equal(PeerElection.Rank(0, true, true, true), h.LastHeartbeat.Item1);
+            h.TickUntil(() => h.LastHeartbeat.Item1 == PeerElection.Rank(0, true, true, true));
         }
 
         // A docked ship's PB, outranked by the station's, runs one plan while warming up — the plan's slow first pass

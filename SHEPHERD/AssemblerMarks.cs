@@ -19,7 +19,7 @@ namespace IngameScript
         AssemblerMark Mark { get; }
         bool CanCooperate { get; }
         bool Cooperative { get; }
-        void SetCooperative(bool on);
+        void SetCooperative(bool on, bool dry);
     }
 
     // Checks the marks per construct and decides which assemblers take orders. A construct is valid with exactly one
@@ -28,7 +28,7 @@ namespace IngameScript
     // orders like a Main and doesn't count as one. The cooperative switch is set to match the mark only at home: a
     // docked block's settings leave with its pilot, so a docked mismatch is reported instead and holds the construct.
     // The disassembling Coop is left as the craft planner set it: its switch is off while it drains.
-    public sealed class MarkCheck
+    public class MarkCheck
     {
         const int ListedNames = 3;
         readonly List<int> mains = new List<int>();
@@ -39,7 +39,7 @@ namespace IngameScript
 
         public List<string> Problems => problems;
         // Tagged assemblers on valid constructs that are on and intact: the ones SHEPHERD queues on or that help them.
-        public int Controlled { get; private set; }
+        public int Controlled;
 
         public bool IsValid(int construct) =>
             construct >= mains.Count || mismatches[construct] == 0
@@ -50,34 +50,34 @@ namespace IngameScript
 
         public void Check<T>(List<T> assemblers, long disassembler = 0) where T : IMarkedAssembler
         {
-            mains.Clear();
-            coops.Clear();
-            mismatches.Clear();
-            problems.Clear();
+            mains.Empty();
+            coops.Empty();
+            mismatches.Empty();
+            problems.Empty();
             foreach (var a in assemblers)
             {
                 var c = a.Construct;
-                while (mains.Count <= c) { mains.Add(0); coops.Add(0); mismatches.Add(0); }
+                while (mains.Count <= c) { mains.Push(0); coops.Push(0); mismatches.Push(0); }
                 var main = a.Mark == AssemblerMark.Main;
                 if (main) mains[c]++;
                 else if (a.Mark == AssemblerMark.Coop && a.CanCooperate) coops[c]++;
                 if (c > 0 && Mismatched(a))
                 {
                     mismatches[c]++;
-                    problems.Add(a.Name + ": cooperative switch doesn't match " + (main ? "Main" : "Coop"));
+                    problems.Push(a.Name + ": cooperative switch doesn't match " + (main ? "Main" : "Coop"));
                 }
             }
             for (var c = 0; c < mains.Count; c++)
             {
-                if (mains[c] > 1) problems.Add(Names(assemblers, c, AssemblerMark.Main, "assemblers: several Main - "));
-                else if (mains[c] == 0 && coops[c] > 0) problems.Add(Names(assemblers, c, AssemblerMark.Coop, "assemblers: no Main among Coop "));
+                if (mains[c] > 1) problems.Push(Names(assemblers, c, AssemblerMark.Main, "assemblers: several Main - "));
+                else if (mains[c] == 0 && coops[c] > 0) problems.Push(Names(assemblers, c, AssemblerMark.Coop, "assemblers: no Main among Coop "));
             }
             Controlled = 0;
             foreach (var a in assemblers)
             {
                 if (a.Mark != AssemblerMark.None && a.IsOperational && IsValid(a.Construct)) Controlled++;
                 a.IsReceiver = IsValid(a.Construct) && TakesOrders(a);
-                if (a.Construct == 0 && IsValid(0) && a.Id != disassembler && Mismatched(a)) a.SetCooperative(a.Mark == AssemblerMark.Coop);
+                if (a.Construct == 0 && IsValid(0) && a.Id != disassembler && Mismatched(a)) a.SetCooperative(a.Mark == AssemblerMark.Coop, false);
             }
         }
 
@@ -86,13 +86,13 @@ namespace IngameScript
 
         string Names<T>(List<T> assemblers, int construct, AssemblerMark mark, string head) where T : IMarkedAssembler
         {
-            sb.Clear().Append(head);
+            sb.Empty().Put(head);
             var n = 0;
             foreach (var a in assemblers)
             {
                 if (a.Construct != construct || a.Mark != mark || mark == AssemblerMark.Coop && !a.CanCooperate) continue;
-                if (n == ListedNames) { sb.Append('…'); break; }
-                sb.Append(n++ > 0 ? ", " : "").Append(a.Name);
+                if (n == ListedNames) { sb.Put('…'); break; }
+                sb.Put(n++ > 0 ? ", " : "").Put(a.Name);
             }
             return sb.ToString();
         }

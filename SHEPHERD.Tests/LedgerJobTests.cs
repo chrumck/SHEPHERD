@@ -33,7 +33,7 @@ namespace SHEPHERD.Tests
             public bool IsSameAs(ICategoryAcceptor acceptor) => false;
             public bool CanPlaceAt(int index, ICategoryAcceptor target) => false;
             public void Prepare(int index, ICategoryAcceptor target) { }
-            public CommitResult Commit() => CommitResult.Refused;
+            public CommitResult Commit(bool dry) => CommitResult.Refused;
         }
 
         sealed class Assembler : IAssemblerState
@@ -46,7 +46,7 @@ namespace SHEPHERD.Tests
             public AssemblerMark Mark { get; set; } = AssemblerMark.Main;
             public bool CanCooperate => true;
             public bool Cooperative { get; set; }
-            public void SetCooperative(bool on) => Cooperative = on;
+            public void SetCooperative(bool on, bool dry) { if (!dry) Cooperative = on; }
             public string Model => "LargeAssembler";
             public double Speed { get; set; } = 1;
             public bool IsWorking => true;
@@ -55,7 +55,7 @@ namespace SHEPHERD.Tests
 
             public Assembler Queue(string blueprint, double amount)
             {
-                queue.Add(new QueueEntry(blueprint, amount));
+                queue.Add(new QueueEntry { Blueprint = blueprint, Amount = amount });
                 return this;
             }
 
@@ -68,10 +68,10 @@ namespace SHEPHERD.Tests
             public void OutputInto(Dictionary<string, double> into) => into.Clear();
 
             public bool CanUse(string blueprint) => true;
-            public void Append(string blueprint, double amount) => queue.Add(new QueueEntry(blueprint, amount));
-            public double Trim(string blueprint, double amount) => 0;
-            public void SetDisassembling(bool on) => IsDisassembling = on;
-            public void ClearQueue() { }
+            public void Append(string blueprint, double amount, bool dry) { if (!dry) queue.Add(new QueueEntry { Blueprint = blueprint, Amount = amount }); }
+            public double Trim(string blueprint, double amount, bool dry) => 0;
+            public void SetDisassembling(bool on, bool dry) { if (!dry) IsDisassembling = on; }
+            public void ClearQueue(bool dry) { }
         }
 
         sealed class Rig
@@ -130,6 +130,20 @@ namespace SHEPHERD.Tests
                 while (job.Step() != StepResult.Done) Assert.True(++guard < 1000);
                 return job;
             }
+        }
+
+        // Every other check reports the run past half the instruction cap: a step tallies one stack, not its budget.
+        [Fact]
+        public void AStepYieldsOnceTheRunIsPastHalfTheCap()
+        {
+            var stock = new Stock();
+            for (var i = 0; i < 20; i++) stock.Add(Plate, 1);
+            var job = new Rig().Source(stock, LedgerKind.Plain).Job(100);
+            var reads = 0;
+            job.Full = () => reads++ % 2 == 1;
+            var steps = 1;
+            while (job.Step() != StepResult.Done) Assert.True(++steps < 1000);
+            Assert.True(steps >= 10, "steps: " + steps);
         }
 
         [Fact]

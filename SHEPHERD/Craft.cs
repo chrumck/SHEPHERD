@@ -11,20 +11,11 @@ namespace IngameScript
 
     public struct CraftAction
     {
-        public readonly CraftActionKind Kind;
-        public readonly IAssemblerState Assembler;
-        public readonly string Blueprint;
-        public readonly double Amount;
-        public readonly string Item;    // the item key the action serves — diagnostics only
-
-        public CraftAction(CraftActionKind kind, IAssemblerState assembler, string blueprint, double amount, string item)
-        {
-            Kind = kind;
-            Assembler = assembler;
-            Blueprint = blueprint;
-            Amount = amount;
-            Item = item;
-        }
+        public CraftActionKind Kind;
+        public IAssemblerState Assembler;
+        public string Blueprint;
+        public double Amount;
+        public string Item;    // the item key the action serves — diagnostics only
     }
 
     // The game-free Craft planner: one pass per cycle over the filled ledger and the walk's assembler snapshots,
@@ -32,7 +23,7 @@ namespace IngameScript
     // discovery). Deficits/surpluses are already net of queued work and capped by authorization (the ledger's
     // math), so a queue that covers its demand plans no action at all — write-on-change by construction. A mode
     // change is only ever emitted for an empty assembler, and only the one tracked disassembler is ever restored.
-    public sealed class CraftPlanner
+    public class CraftPlanner
     {
         readonly List<CraftAction> actions = new List<CraftAction>();
         readonly List<string> needBlueprint = new List<string>();
@@ -65,7 +56,7 @@ namespace IngameScript
         // append in the same plan as a drop hides the drop, which can leave one cycle's building in the claim. Not
         // persisted: after a recompile nothing is trimmed until SHEPHERD queues again, which errs toward leaving
         // work alone.
-        sealed class QueueClaim
+        class QueueClaim
         {
             public long Id;
             public string Key, Blueprint;
@@ -87,7 +78,7 @@ namespace IngameScript
         public const int NoMain = 0, MainOff = 1, MainBusy = 2, NoAssembler = 3, Disassembly = 4;
         public List<string> HeldAssembly => heldAssembly;
         public List<string> HeldDisassembly => heldDisassembly;
-        public string StalledQueueStatus { get; private set; }
+        public string StalledQueueStatus;
 
         public void Plan(ProductionLedger ledger, ProductionFacts facts, List<AssemblerSnapshot> assemblers)
         {
@@ -97,11 +88,11 @@ namespace IngameScript
         public void Plan(ProductionLedger ledger, ProductionFacts facts, List<AssemblerSnapshot> assemblers,
             long unavailableAssembler, double nowSeconds)
         {
-            actions.Clear();
-            needBlueprint.Clear();
-            foreach (var u in unassigned) u.Clear();
-            heldAssembly.Clear();
-            heldDisassembly.Clear();
+            actions.Empty();
+            needBlueprint.Empty();
+            foreach (var u in unassigned) u.Empty();
+            heldAssembly.Empty();
+            heldDisassembly.Empty();
             GroupModels(assemblers);
             ReconcileClaims(ledger, facts, assemblers);
             // The game gives a cooperative assembler work only in Assembly mode, so a Coop left in Disassembly
@@ -111,7 +102,7 @@ namespace IngameScript
                 var st = s.State;
                 if (IsHomeCoop(st) && st.IsDisassembling && s.QueueEmpty
                     && st.Id != TrackedDisassembler && st.Id != unavailableAssembler)
-                    actions.Add(new CraftAction(CraftActionKind.RestoreAssembly, st, null, 0, null));
+                    actions.Push(new CraftAction { Kind = CraftActionKind.RestoreAssembly, Assembler = st });
             }
             var released = ReconcileTracked(assemblers, nowSeconds);
             ledger.CollectKeys(keyScratch);
@@ -125,13 +116,13 @@ namespace IngameScript
                 var deficit = ledger.AssemblyDeficit(key);
                 if (deficit >= 1.0)
                 {
-                    if (ledger.Outgoing(key) > 0) heldAssembly.Add(key);
+                    if (ledger.Outgoing(key) > 0) heldAssembly.Push(key);
                     else PlanAssembly(key, Math.Floor(deficit), facts, assemblers, unavailableAssembler);
                     continue;
                 }
                 var surplus = ledger.DisassemblySurplus(key);
                 if (surplus < 1.0) continue;
-                if (ledger.Incoming(key) > 0) heldDisassembly.Add(key);
+                if (ledger.Incoming(key) > 0) heldDisassembly.Push(key);
                 else PlanDisassembly(key, Math.Floor(surplus), facts, assemblers, released, unavailableAssembler);
             }
             // A drained Coop no surplus wanted any more goes back to helping; the mark check turns its switch on.
@@ -141,22 +132,24 @@ namespace IngameScript
         static bool IsHomeCoop(IMarkedAssembler a) => a.Construct == 0 && a.Mark == AssemblerMark.Coop && a.CanCooperate;
 
         // The count is read before the append, so the new units are known to sit behind everything already queued.
-        public void Append(IAssemblerState a, string key, string blueprint, double units)
+        // Dry claims nothing: the append was never made.
+        public void Append(IAssemblerState a, string key, string blueprint, double units, bool dry)
         {
             double removable;
             var before = Queued(a, blueprint, out removable);
-            a.Append(blueprint, units);
+            a.Append(blueprint, units, dry);
             var c = Find(a.Id, blueprint);
-            if (c == null) claims.Add(c = new QueueClaim { Id = a.Id, Key = key, Blueprint = blueprint, Ahead = before, Last = before });
+            if (dry) return;
+            if (c == null) claims.Push(c = new QueueClaim { Id = a.Id, Key = key, Blueprint = blueprint, Ahead = before, Last = before });
             else Settle(c, before);
             c.Units += units;
             c.Last += units;
         }
 
-        public void Release(IAssemblerState a, string blueprint, double units)
+        public void Release(IAssemblerState a, string blueprint, double units, bool dry)
         {
             var c = Find(a.Id, blueprint);
-            if (c == null) return;
+            if (c == null || dry) return;
             c.Units -= units;
             c.Last -= units;
         }
@@ -195,7 +188,7 @@ namespace IngameScript
                 s.State.QueueInto(queueScratch);
                 foreach (var e in queueScratch)
                     if (Find(whole, e.Blueprint) == null)
-                        claims.Add(new QueueClaim { Id = whole, Key = facts.ItemOf(e.Blueprint), Blueprint = e.Blueprint });
+                        claims.Push(new QueueClaim { Id = whole, Key = facts.ItemOf(e.Blueprint), Blueprint = e.Blueprint });
             }
             for (var c = claims.Count - 1; c >= 0; c--)
             {
@@ -213,7 +206,8 @@ namespace IngameScript
                 var due = claim.Seen;
                 claim.Seen = excess >= 1 && (st.IsDisassembling || st.IsOperational);
                 var take = Math.Min(Math.Floor(excess), Math.Min(claim.Units, Math.Floor(removable)));
-                if (due && claim.Seen && take >= 1) actions.Add(new CraftAction(CraftActionKind.Trim, st, claim.Blueprint, take, claim.Key));
+                if (due && claim.Seen && take >= 1)
+                    actions.Push(new CraftAction { Kind = CraftActionKind.Trim, Assembler = st, Blueprint = claim.Blueprint, Amount = take, Item = claim.Key });
             }
         }
 
@@ -252,7 +246,7 @@ namespace IngameScript
                 if (!st.IsDisassembling && IsHomeCoop(st))
                 {
                     if (!st.IsOperational) break;
-                    if (st.Cooperative) actions.Add(new CraftAction(CraftActionKind.StopCooperating, st, null, 0, null));
+                    if (st.Cooperative) actions.Push(new CraftAction { Kind = CraftActionKind.StopCooperating, Assembler = st });
                     else if (s.QueueEmpty) drained = st;
                     return false;
                 }
@@ -268,13 +262,13 @@ namespace IngameScript
                     }
                     else if (nowSeconds - queueProgressTime >= StallSeconds)
                     {
-                        actions.Add(new CraftAction(CraftActionKind.ClearQueue, st, null, 0, null));
+                        actions.Push(new CraftAction { Kind = CraftActionKind.ClearQueue, Assembler = st });
                         StalledQueueStatus = "clearing stalled disassembly queue on " + st.Name;
                         observedDisassembler = 0;
                     }
                     return false;
                 }
-                actions.Add(new CraftAction(CraftActionKind.RestoreAssembly, st, null, 0, null));
+                actions.Push(new CraftAction { Kind = CraftActionKind.RestoreAssembly, Assembler = st });
                 TrackedDisassembler = 0;
                 observedDisassembler = 0;
                 return true;
@@ -292,9 +286,9 @@ namespace IngameScript
         // isn't probed, so a pool of mixed models is weighted roughly. The tracked disassembler helps no one.
         void GroupModels(List<AssemblerSnapshot> assemblers)
         {
-            modelOf.Clear();
-            modelProbe.Clear();
-            plannedLoad.Clear();
+            modelOf.Empty();
+            modelProbe.Empty();
+            plannedLoad.Empty();
             double poolSpeed = 0, poolQueue = 0;
             var mains = 0;
             homeHasMain = false;
@@ -304,9 +298,9 @@ namespace IngameScript
                 var model = st.Model;
                 var m = 0;
                 while (m < modelProbe.Count && modelProbe[m].Model != model) m++;
-                if (m == modelProbe.Count) modelProbe.Add(st);
-                modelOf.Add(m);
-                plannedLoad.Add(s.QueueAmount);
+                if (m == modelProbe.Count) modelProbe.Push(st);
+                modelOf.Push(m);
+                plannedLoad.Push(s.QueueAmount);
                 if (st.Mark == AssemblerMark.Coop && st.CanCooperate)
                 {
                     if (!st.IsOperational || st.IsDisassembling || st.Id == TrackedDisassembler) continue;
@@ -319,13 +313,13 @@ namespace IngameScript
                     homeHasMain |= st.Construct == 0;
                 }
             }
-            weight.Clear();
-            crewLoad.Clear();
+            weight.Empty();
+            crewLoad.Empty();
             foreach (var s in assemblers)
             {
                 var share = s.State.Mark == AssemblerMark.Main && s.State.IsReceiver ? 1.0 / mains : 0;
-                weight.Add(s.Speed + poolSpeed * share);
-                crewLoad.Add(poolQueue * share);
+                weight.Push(s.Speed + poolSpeed * share);
+                crewLoad.Push(poolQueue * share);
             }
         }
 
@@ -338,9 +332,9 @@ namespace IngameScript
         {
             string bp = null;
             var resolved = false;
-            candidates.Clear();
-            modelVerdict.Clear();
-            foreach (var p in modelProbe) modelVerdict.Add(0);
+            candidates.Empty();
+            modelVerdict.Empty();
+            foreach (var p in modelProbe) modelVerdict.Push(0);
             for (var i = 0; i < assemblers.Count; i++)
             {
                 var st = assemblers[i].State;
@@ -352,14 +346,14 @@ namespace IngameScript
                     modelVerdict[m] = !facts.TryResolveBlueprint(key, probe.CanUse, out bp) ? 1 : probe.CanUse(bp) ? 3 : 2;
                 }
                 resolved |= modelVerdict[m] > 1;
-                if (modelVerdict[m] == 3) candidates.Add(i);
+                if (modelVerdict[m] == 3) candidates.Push(i);
             }
             if (candidates.Count == 0)
             {
                 string known;
                 var why = Why(assemblers);
-                if (why < NoAssembler || resolved || facts.TryBlueprint(key, out known)) unassigned[why].Add(key);
-                else needBlueprint.Add(key);
+                if (why < NoAssembler || resolved || facts.TryBlueprint(key, out known)) unassigned[why].Push(key);
+                else needBlueprint.Push(key);
                 return;
             }
 
@@ -389,7 +383,8 @@ namespace IngameScript
                 cumulative += level * weight[i] - plannedLoad[i] - crewLoad[i];
                 var upTo = c == candidates.Count - 1 ? amount : Math.Min(amount, Math.Round(cumulative));
                 if (upTo <= given) continue;
-                actions.Add(new CraftAction(CraftActionKind.AppendAssembly, assemblers[i].State, bp, upTo - given, key));
+                actions.Push(new CraftAction
+                    { Kind = CraftActionKind.AppendAssembly, Assembler = assemblers[i].State, Blueprint = bp, Amount = upTo - given, Item = key });
                 plannedLoad[i] += upTo - given;
                 given = upTo;
             }
@@ -411,7 +406,7 @@ namespace IngameScript
                 foreach (var s in assemblers)
                     if (s.State.Id != unavailableAssembler && facts.TryResolveBlueprint(key, s.State.CanUse, out bp)) break;
             }
-            if (bp == null) { needBlueprint.Add(key); return; }
+            if (bp == null) { needBlueprint.Push(key); return; }
 
             if (TrackedDisassembler != 0)
             {
@@ -421,12 +416,12 @@ namespace IngameScript
                     if (st.Id != TrackedDisassembler || st.Id == unavailableAssembler) continue;
                     if (st == drained && homeHasMain && st.CanUse(bp))
                     {
-                        actions.Add(new CraftAction(CraftActionKind.SetDisassembly, st, null, 0, key));
+                        actions.Push(new CraftAction { Kind = CraftActionKind.SetDisassembly, Assembler = st, Item = key });
                         drained = null;
                     }
                     else if (!st.IsDisassembling || !st.IsOperational || !(st.IsReceiver && st.Construct == 0 || IsHomeCoop(st) && homeHasMain)
                         || !st.CanUse(bp)) return;    // this surplus waits its turn
-                    actions.Add(new CraftAction(CraftActionKind.AppendDisassembly, st, bp, amount, key));
+                    actions.Push(new CraftAction { Kind = CraftActionKind.AppendDisassembly, Assembler = st, Blueprint = bp, Amount = amount, Item = key });
                     return;
                 }
                 return;
@@ -448,11 +443,11 @@ namespace IngameScript
                 TrackedDisassembler = coop.State.Id;
                 if (!coop.QueueEmpty || coop.State.Cooperative)
                 {
-                    actions.Add(new CraftAction(CraftActionKind.StopCooperating, coop.State, null, 0, key));
+                    actions.Push(new CraftAction { Kind = CraftActionKind.StopCooperating, Assembler = coop.State, Item = key });
                     return;
                 }
-                actions.Add(new CraftAction(CraftActionKind.SetDisassembly, coop.State, null, 0, key));
-                actions.Add(new CraftAction(CraftActionKind.AppendDisassembly, coop.State, bp, amount, key));
+                actions.Push(new CraftAction { Kind = CraftActionKind.SetDisassembly, Assembler = coop.State, Item = key });
+                actions.Push(new CraftAction { Kind = CraftActionKind.AppendDisassembly, Assembler = coop.State, Blueprint = bp, Amount = amount, Item = key });
                 return;
             }
             for (var i = 0; i < assemblers.Count; i++)
@@ -463,10 +458,10 @@ namespace IngameScript
                     || best >= 0 && s.Speed <= assemblers[best].Speed || !st.CanUse(bp)) continue;
                 best = i;
             }
-            if (best < 0) { unassigned[Disassembly + Why(assemblers)].Add(key); return; }
+            if (best < 0) { unassigned[Disassembly + Why(assemblers)].Push(key); return; }
             var chosen = assemblers[best].State;
-            actions.Add(new CraftAction(CraftActionKind.SetDisassembly, chosen, null, 0, key));
-            actions.Add(new CraftAction(CraftActionKind.AppendDisassembly, chosen, bp, amount, key));
+            actions.Push(new CraftAction { Kind = CraftActionKind.SetDisassembly, Assembler = chosen, Item = key });
+            actions.Push(new CraftAction { Kind = CraftActionKind.AppendDisassembly, Assembler = chosen, Blueprint = bp, Amount = amount, Item = key });
             TrackedDisassembler = chosen.Id;
         }
 
@@ -489,17 +484,20 @@ namespace IngameScript
     // returned as Moved so the scheduler attributes it like a transfer and arms the post-heavy refractory. A plan
     // holds only a few mutations, so spacing them costs little. Pooled: Rearm copies the plan. An append is claimed
     // only once it lands, so a plan dropped before running never claims the player's units of the same blueprint.
-    public sealed class CraftJob : IStepJob
+    public class CraftJob : IStepJob
     {
         readonly List<CraftAction> actions = new List<CraftAction>();
         CraftPlanner planner;
         int cursor;
 
-        public void Rearm(CraftPlanner planned)
+        // A dry job makes none of its actions; Program runs one of each kind that way, on a real assembler.
+        public bool Dry;
+
+        public void Rearm(CraftPlanner planned, List<CraftAction> list)
         {
             planner = planned;
-            actions.Clear();
-            actions.AddRange(planned.Actions);
+            actions.Empty();
+            actions.AddRange(list);
             cursor = 0;
         }
 
@@ -511,16 +509,16 @@ namespace IngameScript
             var a = actions[cursor];
             cursor++;
             if (a.Kind == CraftActionKind.AppendAssembly || a.Kind == CraftActionKind.AppendDisassembly)
-                planner.Append(a.Assembler, a.Item, a.Blueprint, a.Amount);
+                planner.Append(a.Assembler, a.Item, a.Blueprint, a.Amount, Dry);
             else if (a.Kind == CraftActionKind.Trim)
-                planner.Release(a.Assembler, a.Blueprint, a.Assembler.Trim(a.Blueprint, a.Amount));
+                planner.Release(a.Assembler, a.Blueprint, a.Assembler.Trim(a.Blueprint, a.Amount, Dry), Dry);
             else if (a.Kind == CraftActionKind.ClearQueue)
-                a.Assembler.ClearQueue();
+                a.Assembler.ClearQueue(Dry);
             else if (a.Kind == CraftActionKind.StopCooperating)
-                a.Assembler.SetCooperative(false);
+                a.Assembler.SetCooperative(false, Dry);
             else
-                a.Assembler.SetDisassembling(a.Kind == CraftActionKind.SetDisassembly);
-            return StepResult.Moved;
+                a.Assembler.SetDisassembling(a.Kind == CraftActionKind.SetDisassembly, Dry);
+            return Dry ? StepResult.Scanned : StepResult.Moved;
         }
     }
 }

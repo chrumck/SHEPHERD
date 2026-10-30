@@ -8,7 +8,7 @@ using VRage.Game.ModAPI.Ingame;
 namespace IngameScript
 {
     // A live routing target: a block's primary inventory paired with its parsed accept-set.
-    public sealed class Destination : ICategoryAcceptor
+    public class Destination : ICategoryAcceptor
     {
         public readonly IMyTerminalBlock Block;
         readonly IMyInventory inv;
@@ -39,7 +39,7 @@ namespace IngameScript
     // generator / refinery pulls its fuel or ore ahead of any storage container, and — because IsDemand is true —
     // even out of an accepting container. Self-limiting: once CurrentVolume reaches the fill target Accepts goes
     // false, its demand clears, and container anti-churn resumes, so there is no ping-pong.
-    public sealed class MachineFeed : ICategoryAcceptor, IRefineryFeed
+    public class MachineFeed : ICategoryAcceptor, IRefineryFeed
     {
         // An open feed waits until its machine has burnt below this share of the target, then refills it in one
         // transfer: topping up whatever a running machine consumed since the last cycle was a move per machine per
@@ -138,7 +138,7 @@ namespace IngameScript
     // loadout; unlike MachineFeed it self-limits on COUNTS (the pool's per-item deficit), which volume can't bound.
     // Accepts only an item the pool has an unmet quota for; ClaimTransferAmount caps the move to that deficit (and
     // decrements it, so the pool doesn't over-pull within a cycle — a fresh recount next cycle corrects any drift).
-    public sealed class ReserveIntake : ICategoryAcceptor
+    public class ReserveIntake : ICategoryAcceptor
     {
         readonly IMyInventory inv;
         readonly ReservePool pool;
@@ -175,7 +175,7 @@ namespace IngameScript
     // IMyGasTank.RefillBottles(), HasGas gates a gasless tank. Built by Program (it owns the shared item buffer).
     // AcceptedCategories is empty because the feed targets the intake directly (BottleJob does not route it) —
     // Accepts is the only gate.
-    public sealed class RefillStation : ICategoryAcceptor, IBottleTank
+    public class RefillStation : ICategoryAcceptor, IBottleTank
     {
         static readonly string[] noCategories = new string[0];
         readonly IMyGasTank tank;
@@ -194,10 +194,10 @@ namespace IngameScript
         // whether at least one empty bottle was actually filled. RefillBottles is synchronous, so FilledRatio
         // reflects it immediately. The sweep keeps cycling a big bottle stack through the tank until a refill
         // fills nothing (all cycled bottles full, or the tank ran dry).
-        public bool Refill()
+        public bool Refill(bool dry)
         {
             var before = (double)tank.FilledRatio;
-            tank.RefillBottles();
+            if (!dry) tank.RefillBottles();
             return (double)tank.FilledRatio < before;
         }
         public ISortSource Contents => contents;
@@ -223,23 +223,14 @@ namespace IngameScript
     // A struct, like ManagedBlock: stored inline in its per-scan List, so the rebuild allocates no per-container object.
     public struct ReserveContainer
     {
-        public readonly IMyTerminalBlock Block;
-        public readonly IMyInventory Inventory;
-        public readonly string Pool;
-        public readonly bool DualRole;
-        public readonly bool Docked;
-
-        public ReserveContainer(IMyTerminalBlock block, IMyInventory inventory, string pool, bool dualRole, bool docked)
-        {
-            Block = block;
-            Inventory = inventory;
-            Pool = pool;
-            DualRole = dualRole;
-            Docked = docked;
-        }
+        public IMyTerminalBlock Block;
+        public IMyInventory Inventory;
+        public string Pool;
+        public bool DualRole;
+        public bool Docked;
     }
 
-    public sealed class ScanResult
+    public class ScanResult
     {
         public IMyTerminalBlock StatusLcd; // [SHEPHERD]        — glanceable health view
         public IMyTerminalBlock DebugLcd;  // [SHEPHERD-DEBUG]  — profiler
@@ -249,6 +240,7 @@ namespace IngameScript
         public readonly List<ReserveContainer> Reserves = new List<ReserveContainer>();
         public readonly List<ReserveContainer> ReserveLcds = new List<ReserveContainer>(); // levels LCDs, no inventory
         public readonly List<Destination> StockLcds = new List<Destination>(); // [SHEPHERD:...] LCDs, no inventory
+        public readonly List<IMyLightingBlock> Lights = new List<IMyLightingBlock>(); // [SHEPHERD] lights
         public readonly List<IMyGasTank> Tanks = new List<IMyGasTank>(); // bottle refill stations
     }
 
@@ -257,8 +249,11 @@ namespace IngameScript
     // limiter's peak bar with grid size. Result is the accumulated ScanResult, complete once Step returns false.
     // Indexed (not foreach) because the pass resumes mid-list across ticks; hand-rolled rather than a coroutine to
     // keep the one-heavy-op-per-tick invariant explicit, like SortJob.
-    public sealed partial class ClassifyCursor
+    public partial class ClassifyCursor
     {
+        // Set by Program: the run has passed half the instruction cap. A unit's cost grows with the grid, and the cap
+        // stops the script outright, so a step yields then too.
+        public Func<bool> Full = () => false;
         ScanResult result = new ScanResult();
         IList<IMyTerminalBlock> blocks;
         ManagedScope scope;
@@ -295,7 +290,7 @@ namespace IngameScript
             var processed = 0;
             while (index < count)
             {
-                if (budget > 0 && processed >= budget) return true;
+                if (budget > 0 && processed >= budget || Full()) return true;
                 Scan.ClassifyOne(blocks[index], scope, result);
                 index++;
                 processed++;
@@ -310,7 +305,8 @@ namespace IngameScript
         // block is managed if it is in scope, owned, has an inventory and is not excluded; each carries its Role and
         // inventories, and a home block is additionally a routing destination if it carries a [SHEPHERD:...] tag.
         // [SHEPHERD-Off] beats a destination tag. The first home [SHEPHERD]/[SHEPHERD-DEBUG]/[SHEPHERD-LOG] block is
-        // the status/profiler/log LCD (captured before the exclude/inventory checks — a display has no inventory).
+        // the status/profiler/log LCD (captured before the exclude/inventory checks — a display has no inventory),
+        // except that a [SHEPHERD] light is a status light, all of them — one listed first must not take the panel.
         //
         // A docked grid is resupply, not storage: its destination tags are inert (else docking siphons the base's
         // stock into the ship), so its containers just drain home, while its reserve containers still fill to quota.
@@ -326,8 +322,12 @@ namespace IngameScript
             // A docked ship's panels belong to its own SHEPHERD, standing by while docked.
             if (home)
             {
-                if (tag.IsStatusLcd && result.StatusLcd == null)
-                    result.StatusLcd = block;
+                if (tag.IsStatusLcd)
+                {
+                    var light = block as IMyLightingBlock;
+                    if (light != null) result.Lights.Push(light);
+                    else if (result.StatusLcd == null) result.StatusLcd = block;
+                }
                 if (tag.IsDebugLcd && result.DebugLcd == null)
                     result.DebugLcd = block;
                 if (tag.IsLogLcd && result.LogLcd == null)
@@ -337,8 +337,8 @@ namespace IngameScript
             if (tag.IsOff) return;
             if (!block.HasInventory)
             {
-                if (tag.IsReserve) result.ReserveLcds.Add(new ReserveContainer(block, null, tag.ReservePool ?? "", false, !home));
-                else if (tag.IsDestination && home) result.StockLcds.Add(new Destination(block, null, tag));
+                if (tag.IsReserve) result.ReserveLcds.Push(new ReserveContainer { Block = block, Pool = tag.ReservePool ?? "", Docked = !home });
+                else if (tag.IsDestination && home) result.StockLcds.Push(new Destination(block, null, tag));
                 return;
             }
 
@@ -351,19 +351,23 @@ namespace IngameScript
 
             // A gas tank is a bottle refill station, not drain-storage: its inventory holds bottles being
             // maintained, so it is captured here and NOT added to Managed (never drained by the sort).
-            if (block is IMyGasTank) { if (home) result.Tanks.Add((IMyGasTank)block); return; }
+            if (block is IMyGasTank) { if (home) result.Tanks.Push((IMyGasTank)block); return; }
 
             var role = Roles.Of(block);
             // A docked ship's fuel and production stay the pilot's unless a setting opts in: whatever SHEPHERD drained,
             // fed or switched would leave with the ship.
             if (!home && (role == Role.Consumer && !scope.DockedFuel || role == Role.Processor && !scope.DockedProduction)) return;
             var output = role == Role.Processor ? block.GetInventory(1) : null;
-            result.Managed.Add(new ManagedBlock(block, role, inv, output, tag.IsReserve ? (tag.ReservePool ?? "") : null, at,
-                tag.IsCatchAll && home && !tag.IsReserve, tag.IsMain ? AssemblerMark.Main : tag.IsCoop ? AssemblerMark.Coop : AssemblerMark.None));
+            result.Managed.Push(new ManagedBlock
+            {
+                Block = block, Role = role, Input = inv, Output = output, ReservePool = tag.IsReserve ? (tag.ReservePool ?? "") : null, Construct = at,
+                CatchAll = tag.IsCatchAll && home && !tag.IsReserve, Mark = tag.IsMain ? AssemblerMark.Main : tag.IsCoop ? AssemblerMark.Coop : AssemblerMark.None
+            });
             if (tag.IsReserve)
-                result.Reserves.Add(new ReserveContainer(block, inv, tag.ReservePool ?? "", tag.IsDestination, !home));
+                result.Reserves.Push(new ReserveContainer
+                    { Block = block, Inventory = inv, Pool = tag.ReservePool ?? "", DualRole = tag.IsDestination, Docked = !home });
             else if (tag.IsDestination && home)
-                result.Destinations.Add(new Destination(block, inv, tag));
+                result.Destinations.Push(new Destination(block, inv, tag));
         }
     }
 }

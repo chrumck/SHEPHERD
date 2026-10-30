@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using IngameScript;
 using VRage;
 using VRage.Game.ModAPI.Ingame;
@@ -63,20 +64,23 @@ namespace SHEPHERD.Tests
             public int Room => RoomValue;
             public bool Blocked => BlockedValue;
 
-            public void Refresh() { }
+            public int Refreshes, Probes;
+            public void Refresh() { Refreshes++; }
             public int Count => bin.Stacks.Count;
             public string CategoryAt(int i) => bin.Stacks[i].Full ? "F" : "E";
-            public string KeyAt(int i) => CategoryAt(i);
+            public string KeyAt(int i) => "OxygenContainerObject/OxygenBottle";
             public double AmountAt(int i) => bin.Stacks[i].Count;
             public bool ShouldDrain(int i) => true;
             public bool DemandOnly => false;
             public bool IsSameAs(ICategoryAcceptor a) => ReferenceEquals(a, this);
-            public bool CanPlaceAt(int i, ICategoryAcceptor target) { var b = target as IBinTarget; return b != null && b.Room > 0; }
+            public bool CanPlaceAt(int i, ICategoryAcceptor target) { Probes++; var b = target as IBinTarget; return b != null && b.Room > 0; }
             public void Prepare(int i, ICategoryAcceptor target) { pending = i; pendingTarget = target as IBinTarget; }
-            public CommitResult Commit()
+            public int DryCommits;
+            public CommitResult Commit(bool dry)
             {
                 var t = pendingTarget; var idx = pending;
                 pendingTarget = null; pending = -1;
+                if (dry) { DryCommits++; return CommitResult.Refused; }
                 if (t == null || t.Blocked || t.Room <= 0 || idx < 0 || idx >= bin.Stacks.Count) return CommitResult.Refused;
                 var st = bin.Stacks[idx];
                 var move = Math.Min(st.Count, t.Room);
@@ -113,8 +117,10 @@ namespace SHEPHERD.Tests
                 contents = new Store(Inv) { Name = name };
             }
             public bool HasGas => Gas;
-            public bool Refill()                     // fill the tank's empties; report whether any were empty (FilledRatio drop)
+            public int DryRefills;
+            public bool Refill(bool dry)             // fill the tank's empties; report whether any were empty (FilledRatio drop)
             {
+                if (dry) { DryRefills++; return false; }
                 Refills++;
                 if (!Gas) return false;
                 var had = false;
@@ -160,6 +166,95 @@ namespace SHEPHERD.Tests
         // THE headline fix: a single stack of 50 empty bottles is fully filled through ONE gas tank whose
         // inventory only holds 10 at a time. v0.28.0 filled just the first 10 (one tank-volume) and abandoned the
         // rest; the per-stack refill loop drains the whole stack through the tank in one sweep.
+        // The most of a counter any one step of the job adds, run to the end.
+        static int MostPerStep(BottleJob job, Func<int> counter)
+        {
+            var most = 0;
+            for (var guard = 0; guard < 100000; guard++)
+            {
+                var before = counter();
+                var s = job.Step();
+                most = Math.Max(most, counter() - before);
+                if (s == StepResult.Done) return most;
+            }
+            Assert.Fail("BottleJob did not terminate");
+            return most;
+        }
+
+        static List<IBottleTank> Gasless(int count)
+        {
+            var tanks = new List<IBottleTank>();
+            for (var i = 0; i < count; i++) tanks.Add(new Tank("Tank " + i, 10, false));
+            return tanks;
+        }
+
+        // Each bottle no tank takes is offered to every tank; at thirty tanks a step of a hundred stacks overran
+        // the instruction cap on a large grid.
+        [Fact]
+        public void EachOfferToATankDrawsTheBudget()
+        {
+            var bin = new Bin();
+            for (var i = 0; i < 50; i++) bin.Stacks.Add(new Stack(1, false));
+            var storage = new Store(bin);
+            Assert.InRange(MostPerStep(new BottleJob(new List<ISortSource> { storage }, Gasless(30), 10), () => storage.Probes), 1, 40);
+        }
+
+        // A tank's bottle with nowhere to go was offered to every storage source in one step.
+        [Fact]
+        public void ADrainSearchesStorageOnTheBudget()
+        {
+            var full = new List<ISortSource>();
+            for (var i = 0; i < 200; i++) full.Add(new Store(new Bin()) { RoomValue = 0 });
+            var tank = new Tank("O2 Tank", 10, false);
+            tank.Inv.Add(1, false);
+            var contents = (Store)tank.Contents;
+            Assert.InRange(MostPerStep(new BottleJob(full, new List<IBottleTank> { tank }, 10), () => contents.Probes), 1, 11);
+        }
+
+        // Empty storage ahead of the first stack was walked once per tank in one step.
+        [Fact]
+        public void ADrySweepsRoundTripsWalkStorageOnTheBudget()
+        {
+            var stores = new List<Store>();
+            for (var i = 0; i < 200; i++) stores.Add(new Store(new Bin()));
+            var last = new Bin(); last.Add(1, false);
+            stores.Add(new Store(last));
+            var job = new BottleJob(new List<ISortSource>(stores), Gasless(5), 10) { Dry = true };
+            Assert.InRange(MostPerStep(job, () => stores.Sum(s => s.Refreshes)), 1, 12);
+        }
+
+        [Fact]
+        public void ADrySweepFillsAndMovesNothing()
+        {
+            var bin = new Bin(); bin.Add(5, false);
+            var storage = new Store(bin);
+            var tank = new Tank("O2 Tank", 10, true);
+
+            RunToDone(new BottleJob(new List<ISortSource> { storage }, new List<IBottleTank> { tank }, 0) { Dry = true });
+
+            Assert.Equal(5, bin.Count(false));
+            Assert.Empty(tank.Inv.Stacks);
+            Assert.Equal(0, tank.Refills);
+            Assert.True(tank.DryRefills > 0);
+        }
+
+        [Fact]
+        public void ADrySweepWithNoBottlesStillSendsEachTankARoundTrip()
+        {
+            // Gasless tanks take no bottle, so the walk finds nothing; the round trip still runs, dry.
+            var bin = new Bin(); bin.Add(1, true);
+            var storage = new Store(bin);
+            var a = new Tank("A", 10, false);
+            var b = new Tank("B", 10, false);
+
+            RunToDone(new BottleJob(new List<ISortSource> { storage }, new List<IBottleTank> { a, b }, 0) { Dry = true });
+
+            Assert.Equal(1, a.DryRefills);
+            Assert.Equal(1, b.DryRefills);
+            Assert.Equal(2, storage.DryCommits);
+            Assert.Equal(1, bin.Total());
+        }
+
         [Fact]
         public void BigStackIsFullyFilledThroughASmallTank()
         {

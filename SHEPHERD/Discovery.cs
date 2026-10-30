@@ -6,19 +6,12 @@ namespace IngameScript
 
     public struct KnowledgeRequest
     {
-        public readonly KnowledgeKind Kind;
-        public readonly string Key;
-        public readonly string Reason;
-
-        public KnowledgeRequest(KnowledgeKind kind, string key, string reason)
-        {
-            Kind = kind;
-            Key = key;
-            Reason = reason;
-        }
+        public KnowledgeKind Kind;
+        public string Key;
+        public string Reason;
     }
 
-    public sealed class DiscoveryCoordinator
+    public class DiscoveryCoordinator
     {
         KnowledgeRequest active;
         KnowledgeRequest parked;
@@ -35,11 +28,11 @@ namespace IngameScript
             if (parked.Key != null && !Contains(blueprints, parked.Key)) parked = default(KnowledgeRequest);
             if (active.Key != null) return;
             var key = parked.Key == null ? First(blueprints, null) : null;
-            if (key != null) active = new KnowledgeRequest(KnowledgeKind.Blueprint, key, key);
+            if (key != null) active = new KnowledgeRequest { Kind = KnowledgeKind.Blueprint, Key = key, Reason = key };
             else
             {
                 key = First(yields, null);
-                if (key != null) active = new KnowledgeRequest(KnowledgeKind.Yield, key, key);
+                if (key != null) active = new KnowledgeRequest { Kind = KnowledgeKind.Yield, Key = key, Reason = key };
             }
         }
 
@@ -87,7 +80,7 @@ namespace IngameScript
     public enum BlueprintPhase { Idle, Protecting, Queued, Observing, Manual }
     public enum BlueprintObservation { None, Learned, Manual }
 
-    public sealed class BlueprintProbe
+    public class BlueprintProbe
     {
         readonly Dictionary<string, double> baseline = new Dictionary<string, double>();
         readonly Dictionary<string, double> output = new Dictionary<string, double>();
@@ -96,11 +89,11 @@ namespace IngameScript
         long manualAssembler;
         string manualBlueprint;
 
-        public BlueprintPhase Phase { get; private set; }
-        public string Item { get; private set; }
-        public long AssemblerId { get; private set; }
+        public BlueprintPhase Phase;
+        public string Item;
+        public long AssemblerId;
         public long ReservedAssemblerId => AssemblerId != 0 ? AssemblerId : manualAssembler;
-        public string Blueprint { get; private set; }
+        public string Blueprint;
         public bool NeedsObservation => Phase == BlueprintPhase.Observing || Phase == BlueprintPhase.Manual;
         // The watch needs the item to be the assembler's ONLY queue entry (a second entry makes the output
         // unattributable) and needs that entry to still be there when the next observation tick looks — so ask for
@@ -139,7 +132,7 @@ namespace IngameScript
                 return;
             }
             selected.State.OutputInto(baseline);
-            actions.Add(new CraftAction(CraftActionKind.AppendAssembly, selected.State, Blueprint, 1.0, item));
+            actions.Push(new CraftAction { Kind = CraftActionKind.AppendAssembly, Assembler = selected.State, Blueprint = Blueprint, Amount = 1.0, Item = item });
             Phase = BlueprintPhase.Queued;
         }
 
@@ -202,8 +195,8 @@ namespace IngameScript
             Blueprint = null;
             AssemblerId = 0;
             Phase = BlueprintPhase.Idle;
-            baseline.Clear();
-            output.Clear();
+            baseline.Empty();
+            output.Empty();
             ClearManualWatch();
         }
 
@@ -221,7 +214,7 @@ namespace IngameScript
             foreach (var pair in output)
             {
                 double before;
-                baseline.TryGetValue(pair.Key, out before);
+                baseline.Get(pair.Key, out before);
                 if (pair.Value <= before) continue;
                 if (pair.Key != Item) { ambiguous = true; continue; }
                 found = true;
@@ -233,16 +226,16 @@ namespace IngameScript
         {
             manualAssembler = 0;
             manualBlueprint = null;
-            baseline.Clear();
+            baseline.Empty();
         }
 
         static string Candidate(string item, IAssemblerState assembler)
         {
             var slash = item.IndexOf('/');
-            var subtype = slash >= 0 ? item.Substring(slash + 1) : item;
-            if (subtype.EndsWith("Item", System.StringComparison.Ordinal))
+            var subtype = slash >= 0 ? item.Cut(slash + 1) : item;
+            if (subtype.Ends("Item"))
             {
-                var stripped = subtype.Substring(0, subtype.Length - 4);
+                var stripped = subtype.Cut(0, subtype.Length - 4);
                 if (assembler.CanUse(stripped)) return stripped;
             }
             var magazine = subtype + "Magazine";
@@ -280,7 +273,7 @@ namespace IngameScript
 
     public enum YieldPhase { Idle, Draining, Ready, Feeding, Measuring }
 
-    public sealed class YieldSample
+    public class YieldSample
     {
         const double AmountEpsilon = 0.1;       // absorbs MyFixedPoint→double drift in the inventory reads
 
@@ -294,10 +287,10 @@ namespace IngameScript
         double maxRate;
         int rateSamples;
 
-        public YieldPhase Phase { get; private set; }
-        public string Ore { get; private set; }
-        public string Ingot { get; private set; }
-        public long RefineryId { get; private set; }
+        public YieldPhase Phase;
+        public string Ore;
+        public string Ingot;
+        public long RefineryId;
         public bool Active => Phase != YieldPhase.Idle;
         public bool Drains => Phase == YieldPhase.Draining;
         public bool Holds => Phase == YieldPhase.Ready || Phase == YieldPhase.Feeding || Phase == YieldPhase.Measuring;
@@ -348,11 +341,11 @@ namespace IngameScript
             if (Phase != YieldPhase.Measuring) return null;
             if (consumed < floor || outputs.Count == 0) return null;
             var learned = new List<OreYield>();
-            keyScratch.Clear();
-            foreach (var key in outputs.Keys) keyScratch.Add(key);
-            keyScratch.Sort(System.StringComparer.Ordinal);
+            keyScratch.Empty();
+            foreach (var key in outputs.Keys) keyScratch.Push(key);
+            keyScratch.SortOrdinal();
             foreach (var key in keyScratch)
-                if (outputs[key] > 0.0) learned.Add(new OreYield(key, outputs[key] / consumed));
+                if (outputs[key] > 0.0) learned.Push(new OreYield { Output = key, Ratio = outputs[key] / consumed });
             return learned.Count > 0 ? learned : null;
         }
 

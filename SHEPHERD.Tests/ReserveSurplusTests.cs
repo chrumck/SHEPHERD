@@ -115,7 +115,7 @@ namespace SHEPHERD.Tests
 
             Assert.True(src.CanPlaceAt(0, tank));
             src.Prepare(0, tank);
-            Assert.Equal(CommitResult.Moved, src.Commit());
+            Assert.Equal(CommitResult.Moved, src.Commit(false));
             Assert.Null(sent);                       // the whole stack, not the pool's excess of 0
             Assert.Equal(4, pool.Count(Bottle));     // the bottles come straight back, so the pool isn't charged
         }

@@ -27,7 +27,7 @@ namespace IngameScript
     // Built once per scan from the scan-ordered acceptor list; turns the naive per-item O(all containers)
     // routing into O(matching containers). Route() ranks the demand tier above the explicit-acceptor tier
     // above the catch-all tier, ordering within each tier by Priority descending then scan order.
-    public sealed class RoutingIndex
+    public class RoutingIndex
     {
         readonly Dictionary<string, List<ICategoryAcceptor>> byCategory = new Dictionary<string, List<ICategoryAcceptor>>();
         readonly List<ICategoryAcceptor> catchAll = new List<ICategoryAcceptor>();
@@ -55,17 +55,17 @@ namespace IngameScript
                     {
                         if (string.IsNullOrEmpty(cat)) continue;
                         List<ICategoryAcceptor> list;
-                        if (!byCategory.TryGetValue(cat, out list))
+                        if (!byCategory.Get(cat, out list))
                         {
                             list = new List<ICategoryAcceptor>();
                             byCategory[cat] = list;
                         }
-                        if (!list.Contains(acceptor)) list.Add(acceptor);
+                        if (!list.Contains(acceptor)) list.Push(acceptor);
                     }
                 }
 
                 if (acceptor.IsCatchAll && !catchAll.Contains(acceptor))
-                    catchAll.Add(acceptor);
+                    catchAll.Push(acceptor);
             }
         }
 
@@ -79,30 +79,30 @@ namespace IngameScript
             List<ICategoryAcceptor> route;
             category = category ?? "";
             builtIn = builtIn ?? "";
-            if (!routes.TryGetValue(category, out byBuiltIn)) routes[category] = byBuiltIn = new Dictionary<string, List<ICategoryAcceptor>>();
-            if (!byBuiltIn.TryGetValue(builtIn, out route)) byBuiltIn[builtIn] = route = Build(category, builtIn);
+            if (!routes.Get(category, out byBuiltIn)) routes[category] = byBuiltIn = new Dictionary<string, List<ICategoryAcceptor>>();
+            if (!byBuiltIn.Get(builtIn, out route)) byBuiltIn[builtIn] = route = Build(category, builtIn);
             return route;
         }
 
-        public void Forget() => routes.Clear();
+        public void Forget() => routes.Empty();
 
         List<ICategoryAcceptor> Build(string category, string builtIn)
         {
             var demandTier = new List<ICategoryAcceptor>();
             var explicitTier = new List<ICategoryAcceptor>();
             List<ICategoryAcceptor> categoryAcceptors;
-            if (!string.IsNullOrEmpty(category) && byCategory.TryGetValue(category, out categoryAcceptors))
+            if (!string.IsNullOrEmpty(category) && byCategory.Get(category, out categoryAcceptors))
                 foreach (var a in categoryAcceptors)
-                    (a.IsDemand ? demandTier : explicitTier).Add(a);
-            if (builtIn != category && !string.IsNullOrEmpty(builtIn) && byCategory.TryGetValue(builtIn, out categoryAcceptors))
+                    (a.IsDemand ? demandTier : explicitTier).Push(a);
+            if (builtIn != category && !string.IsNullOrEmpty(builtIn) && byCategory.Get(builtIn, out categoryAcceptors))
                 foreach (var a in categoryAcceptors)
-                    if (a.IsDemand && !demandTier.Contains(a)) demandTier.Add(a);
+                    if (a.IsDemand && !demandTier.Contains(a)) demandTier.Push(a);
             demandTier.Sort(order);
             explicitTier.Sort(order);
 
             var overflowTier = new List<ICategoryAcceptor>();
             foreach (var c in catchAll)
-                if (!demandTier.Contains(c) && !explicitTier.Contains(c)) overflowTier.Add(c);
+                if (!demandTier.Contains(c) && !explicitTier.Contains(c)) overflowTier.Push(c);
             overflowTier.Sort(order);
 
             var result = new List<ICategoryAcceptor>(demandTier.Count + explicitTier.Count + overflowTier.Count);
@@ -117,7 +117,7 @@ namespace IngameScript
         {
             List<ICategoryAcceptor> named;
             return acceptor.IsCatchAll
-                && !(!string.IsNullOrEmpty(category) && byCategory.TryGetValue(category, out named) && named.Contains(acceptor));
+                && !(!string.IsNullOrEmpty(category) && byCategory.Get(category, out named) && named.Contains(acceptor));
         }
 
         // Whether the category has a destination of its own (or a catch-all) — borrowed machine demand is not one:
@@ -128,7 +128,7 @@ namespace IngameScript
         // Orders one tier by Priority desc, then scan index asc. The scan-index tiebreaker makes the ordering
         // total, so equal-priority acceptors keep scan order despite List.Sort being unstable. IComparer<T>,
         // never Comparison<T> — the latter is off the PB whitelist.
-        sealed class TierOrder : IComparer<ICategoryAcceptor>
+        class TierOrder : IComparer<ICategoryAcceptor>
         {
             readonly Dictionary<ICategoryAcceptor, int> scanIndex;
             public TierOrder(Dictionary<ICategoryAcceptor, int> scanIndex) { this.scanIndex = scanIndex; }

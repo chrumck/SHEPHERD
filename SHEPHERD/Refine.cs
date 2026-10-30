@@ -7,7 +7,7 @@ namespace IngameScript
     // motivated it. Doubles as the constrained feed's claim ledger on the sort path — Allows filters the feed to
     // the selected ore, Cap/Took book each moved amount so the request can never over-feed within its cycle.
     // Dies with the cycle (the feeds it constrains are rebuilt every scan), so no recovery is ever needed.
-    public sealed class FeedRequest
+    public class FeedRequest
     {
         public readonly string Ore;
         public readonly string Ingot;
@@ -56,7 +56,7 @@ namespace IngameScript
     // already net of stock, queued work, and the expected output of ore sitting in refinery inputs (the ledger's
     // math), so a request in flight suppresses re-requesting — write-on-change by construction. Ores are scored
     // across every live deficit (multi-output ores count each), highest score first, ties by ordinal key order.
-    public sealed class RefinePlanner
+    public class RefinePlanner
     {
         readonly List<FeedRequest> requests = new List<FeedRequest>();
         readonly List<string> needYield = new List<string>();
@@ -82,7 +82,7 @@ namespace IngameScript
         // Pre-formatted diagnostic lines (no room / no refinery / no ore) — recomputed per plan, so they persist
         // on the status LCD while blocked and the transition log emits each only on entry.
         public List<string> Blocked => blocked;
-        public string YieldReason { get; private set; }
+        public string YieldReason;
 
         public void Plan(ProductionLedger ledger, ProductionFacts facts, List<IRefineryFeed> feeds, Func<string, bool> outputHasRoom)
         {
@@ -92,15 +92,15 @@ namespace IngameScript
         public void Plan(ProductionLedger ledger, ProductionFacts facts, List<IRefineryFeed> feeds,
             Func<string, bool> outputHasRoom, double yieldSample)
         {
-            requests.Clear();
-            needYield.Clear();
-            blocked.Clear();
-            underSampled.Clear();
-            freeFeeds.Clear();
+            requests.Empty();
+            needYield.Empty();
+            blocked.Empty();
+            underSampled.Empty();
+            freeFeeds.Empty();
             YieldReason = null;
             if (feeds != null)
                 foreach (var feed in feeds)
-                    if (!feed.IsConstrained) freeFeeds.Add(feed);
+                    if (!feed.IsConstrained) freeFeeds.Push(feed);
             Collect(ledger, facts, outputHasRoom, yieldSample);
 
             // Each round either consumes a feed (a request was issued) or zeroes an ore (no refinery can take
@@ -129,10 +129,10 @@ namespace IngameScript
                 if (amount > oreAvail[o]) amount = oreAvail[o];
 
                 var feed = TakeFeed(ore);
-                if (feed == null) { blocked.Add(NoRefineryLine(ore)); oreAvail[o] = 0.0; continue; }
+                if (feed == null) { blocked.Push(NoRefineryLine(ore)); oreAvail[o] = 0.0; continue; }
                 var request = new FeedRequest(ore, reason, amount);
                 feed.Constrain(request);
-                requests.Add(request);
+                requests.Push(request);
                 oreAvail[o] -= amount;
                 foreach (var y in outputs) ReduceDeficit(y.Output, amount * y.Ratio);
             }
@@ -144,11 +144,11 @@ namespace IngameScript
         // and unknown apart. Below one whole ingot is the deadband: at target, not a work order.
         void Collect(ProductionLedger ledger, ProductionFacts facts, Func<string, bool> outputHasRoom, double yieldSample)
         {
-            deficitKeys.Clear();
-            deficits.Clear();
-            oreKeys.Clear();
-            oreAvail.Clear();
-            unknownOres.Clear();
+            deficitKeys.Empty();
+            deficits.Empty();
+            oreKeys.Empty();
+            oreAvail.Empty();
+            unknownOres.Empty();
             ledger.CollectKeys(keyScratch);
             foreach (var key in keyScratch)
             {
@@ -157,20 +157,20 @@ namespace IngameScript
                 {
                     if (outputHasRoom != null && !outputHasRoom(key))
                     {
-                        blocked.Add("refine " + key + ": output has no room");
+                        blocked.Push("refine " + key + ": output has no room");
                         continue;
                     }
-                    deficitKeys.Add(key);
-                    deficits.Add(d);
+                    deficitKeys.Push(key);
+                    deficits.Push(d);
                     continue;
                 }
-                if (!key.StartsWith("Ore/", StringComparison.Ordinal)) continue;
+                if (!key.Starts("Ore/")) continue;
                 var avail = ledger.Available(key);
                 if (avail <= 0.0) continue;
                 List<OreYield> outputs;
-                if (facts.TryYields(key, out outputs)) { oreKeys.Add(key); oreAvail.Add(avail); }
-                else if (avail >= yieldSample) unknownOres.Add(key);
-                else if (yieldSample > 0.0) underSampled.Add(key);
+                if (facts.TryYields(key, out outputs)) { oreKeys.Push(key); oreAvail.Push(avail); }
+                else if (avail >= yieldSample) unknownOres.Push(key);
+                else if (yieldSample > 0.0) underSampled.Push(key);
             }
         }
 
@@ -226,23 +226,23 @@ namespace IngameScript
         {
             var remaining = false;
             for (var i = 0; i < deficits.Count && !remaining; i++) remaining = deficits[i] >= 1.0;
-            if (!remaining) { underSampled.Clear(); return; }
+            if (!remaining) { underSampled.Empty(); return; }
             if (freeFeeds.Count == 0) return;
             var noCandidates = unknownOres.Count == 0 && underSampled.Count == 0;
             for (var i = 0; i < deficits.Count; i++)
             {
                 if (deficits[i] < 1.0) continue;
                 if (YieldReason == null) YieldReason = deficitKeys[i];
-                if (noCandidates) blocked.Add("refine " + deficitKeys[i] + ": no ore");
+                if (noCandidates) blocked.Push("refine " + deficitKeys[i] + ": no ore");
             }
-            foreach (var ore in underSampled) blocked.Add(NeedOreLine(sampleNeed, ore));
+            foreach (var ore in underSampled) blocked.Push(NeedOreLine(sampleNeed, ore));
             foreach (var ore in unknownOres)
             {
                 var compatible = false;
                 foreach (var feed in freeFeeds)
                     if (feed.CanTake(ore)) { compatible = true; break; }
-                if (compatible) needYield.Add(ore);
-                else blocked.Add(NoRefineryLine(ore));
+                if (compatible) needYield.Push(ore);
+                else blocked.Push(NoRefineryLine(ore));
             }
         }
 

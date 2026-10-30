@@ -33,7 +33,8 @@ Either of these marks SHEPHERD:
    script text contains `SHEPHERD` where the reader has the script text (the packed script's header comment names
    it). SHEPHERD adds any missing `[Settings]` key on its first save after a start or a `configReload`, so a newly
    built PB has it within seconds of its first run.
-2. **A `[SHEPHERD]` status panel** whose line 1 has the shape in A3.
+2. **A `[SHEPHERD]` status panel** whose line 1 has the shape in A3 (a block with a screen: a light with the tag
+   is a status light, which has no text).
 
 The PB must also be on, built and powered for SHEPHERD to run. Whether it is doing its jobs is told by the status
 panel (A3), not by the PB.
@@ -116,7 +117,7 @@ A tag ends at the first `]`.
 | `[SHEPHERD-Main]`, `[SHEPHERD-Coop]` | the assembler SHEPHERD crafts on, and its cooperators | |
 | `[SHEPHERD-Off]` | never touched | |
 | `[SHEPHERD-Split]` | on a connector: SHEPHERD's reach ends there | |
-| `[SHEPHERD]`, `[SHEPHERD-DEBUG]`, `[SHEPHERD-LOG]` | | the status, profiler and log screens |
+| `[SHEPHERD]`, `[SHEPHERD-DEBUG]`, `[SHEPHERD-LOG]` | | the status, profiler and log screens; `[SHEPHERD]` on a light makes a status light, never the status panel |
 
 1. **Categories:** the built-ins are `Ores`, `Ingots`, `Components`, `Tools`, `Ammo`, `Consumables`, `Others`. Any
    other token is a custom category. A category token must not contain `[`, `]` or `,`, nor end in `:#` and a number;
@@ -243,7 +244,8 @@ Several SHEPHERD PBs within each other's reach elect one leader; the rest stand 
 
 1. A PB draws only the **first** `[SHEPHERD]` panel on its own construct (its grid and everything joined to it by
    rotors, hinges and pistons), in the order the game lists blocks. Any other `[SHEPHERD]` panel there is not
-   redrawn and keeps whatever it last showed.
+   redrawn and keeps whatever it last showed. A light named `[SHEPHERD]` is not a panel: it neither counts as the
+   first nor stops a panel after it from being drawn.
 2. The leader draws its construct's panel. A standing-by PB draws its own panel only when the leader is on another
    construct, ending with a line naming the leader: `<PB name> on <grid name> leads`. One whose leader shares its
    construct draws nothing.

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace IngameScript
@@ -25,7 +26,7 @@ namespace IngameScript
         // volume), so the sort never picks a container that reports free volume but rejects the item.
         bool CanPlaceAt(int index, ICategoryAcceptor target);
         void Prepare(int index, ICategoryAcceptor target); // capture the pending move on the cheap find tick
-        CommitResult Commit();                              // the one budgeted heavy (conveyor) call, fired alone
+        CommitResult Commit(bool dry);                      // the one budgeted heavy (conveyor) call, fired alone; dry skips it
     }
 
     // Why a commit moved nothing. Only Refused is a conveyor/sorter problem worth warning about: a stack taken
@@ -37,9 +38,8 @@ namespace IngameScript
     // two are indistinguishable). SortJob collects these per cycle (deduped) so Program can surface a diagnostic.
     public struct UnreachableRoute
     {
-        public readonly string Target;
-        public readonly string Category;
-        public UnreachableRoute(string target, string category) { Target = target; Category = category; }
+        public string Target;
+        public string Category;
     }
 
     // The cross-tick sort pass: one lap visits every source once, starting at a rotated index, and may be stopped
@@ -51,7 +51,7 @@ namespace IngameScript
     // so our own transfers never shift a not-yet-processed lower index, and external edits between ticks at worst
     // cost a re-examine. A source or target removed mid-cycle (undock, grind) does not throw: the engine still
     // answers for its inventory and a commit involving it fails like any other, so it needs no special case.
-    public sealed partial class SortJob : IStepJob
+    public partial class SortJob : IStepJob
     {
         const int Unset = -1;
 
@@ -73,6 +73,14 @@ namespace IngameScript
         int chosenRank;             // rank (into the routed list) of the target Prepared this find tick
         string chosenTarget;        // its Name, captured cheap for the commit tick's unreachable diagnostic
         string chosenCategory;      // the Prepared stack's category, likewise captured cheap
+        List<ICategoryAcceptor> warmed; // dry: the targets already sent a move
+
+        // A dry pass moves nothing: every stack with a route sends each target it hasn't reached yet a move whose
+        // engine call is skipped, whether the stack needs to move or not, so each target's code has run once.
+        public bool Dry;
+        // Set by Program: the run has passed half the instruction cap. A unit's cost grows with the grid, and the cap
+        // stops the script outright, so a step yields then too.
+        public Func<bool> Full = () => false;
 
         public SortJob(List<ISortSource> sources, RoutingIndex routing, int examineBudgetPerStep, int startSource,
                        List<string> noRouteSink, List<UnreachableRoute> unreachableSink)
@@ -114,7 +122,7 @@ namespace IngameScript
             if (commitPending)
             {
                 commitPending = false;
-                var committed = sources[Current].Commit();
+                var committed = sources[Current].Commit(false);
                 if (committed == CommitResult.Moved)
                 {
                     // A transfer that moved something leaves the stack worth re-examining THIS cycle — its target
@@ -169,11 +177,11 @@ namespace IngameScript
 
                 while (resumeIndex >= 0)
                 {
-                    if (examined >= examineBudget) return StepResult.Scanned; // resume here next tick, same source
+                    if (examined >= examineBudget || Full()) return StepResult.Scanned; // resume here next tick, same source
                     var i = resumeIndex;                        // no pre-decrement: Advance() owns the cursor step
                     examined++;
 
-                    if (!src.ShouldDrain(i)) { Advance(); continue; }
+                    if (!src.ShouldDrain(i) && !Dry) { Advance(); continue; }
 
                     var cat = src.CategoryAt(i);
                     var targets = routing.Route(cat, Category.ForKey(src.KeyAt(i)));
@@ -181,6 +189,17 @@ namespace IngameScript
                     if (targets.Count == 0) { Advance(); continue; }
 
                     var rank = ChooseTarget(src, i, targets, skipTargets);
+                    // A dry stack walks its whole route three times, and a quoted item's route holds every reserve
+                    // container of its pool, so the route's length draws the budget.
+                    if (Dry)
+                    {
+                        var placed = PlacedIn(src, targets);
+                        if (placed != null) routing.InOverflow(placed, cat);
+                        SendDry(src, i, targets);
+                        examined += targets.Count;
+                        Advance();
+                        continue;
+                    }
                     if (rank < 0) { Advance(); continue; }       // nothing (more) can take it right now
                     var target = targets[rank];
                     // The demand tier ranks first, so a non-demand pick means no demand target has room.
@@ -207,9 +226,21 @@ namespace IngameScript
 
                 NextSource();
                 examined++;         // charge the snapshot itself, so sweeping many empty/sorted sources is bounded
-                if (examined >= examineBudget) return StepResult.Scanned;
+                if (examined >= examineBudget || Full()) return StepResult.Scanned;
             }
             return StepResult.Done;
+        }
+
+        void SendDry(ISortSource src, int index, List<ICategoryAcceptor> targets)
+        {
+            if (warmed == null) warmed = new List<ICategoryAcceptor>();
+            foreach (var t in targets)
+            {
+                if (warmed.Contains(t)) continue;
+                warmed.Push(t);
+                src.Prepare(index, t);
+                src.Commit(true);
+            }
         }
 
         void NextSource() { sourceCursor++; resumeIndex = Unset; revisits = 0; skipTargets = 0; }
@@ -234,13 +265,13 @@ namespace IngameScript
         {
             foreach (var u in UnreachableRoutes)
                 if (u.Target == target && u.Category == category) return;
-            UnreachableRoutes.Add(new UnreachableRoute(target, category));
+            UnreachableRoutes.Push(new UnreachableRoute { Target = target, Category = category });
         }
 
         void RecordNoRoute(string category)
         {
             foreach (var c in noRoute) if (c == category) return;
-            noRoute.Add(category);
+            noRoute.Push(category);
         }
 
         // A demand target is a conditional home, not a permanent one — an over-quota reserve's own intake routes

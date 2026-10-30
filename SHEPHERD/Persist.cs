@@ -20,7 +20,7 @@ namespace IngameScript
     // IIniDocument. It owns the set of SHEPHERD-managed section names; a flush rewrites only those sections from the
     // in-memory model (in-memory authoritative) and never touches the user's own sections, keys, or comments
     // (merge-not-clobber). Reads (reserve quotas, category overrides) go through ReadSection.
-    public sealed partial class ConfigStore
+    public partial class ConfigStore
     {
         readonly IIniDocument doc;
         readonly HashSet<string> managed;
@@ -40,10 +40,10 @@ namespace IngameScript
         public List<KeyValuePair<string, string>> ReadSection(string section)
         {
             var into = new List<KeyValuePair<string, string>>();
-            keyScratch.Clear();
+            keyScratch.Empty();
             doc.KeyNames(section, keyScratch);
             foreach (var key in keyScratch)
-                into.Add(new KeyValuePair<string, string>(key, Value(section, key)));
+                into.Push(new KeyValuePair<string, string>(key, Value(section, key)));
             return into;
         }
 
@@ -57,7 +57,7 @@ namespace IngameScript
         {
             if (value == null) return null;
             var semi = value.IndexOf(';');
-            return (semi >= 0 ? value.Substring(0, semi) : value).Trim();
+            return (semi >= 0 ? value.Cut(0, semi) : value).Trim();
         }
 
         // Rewrite one managed section wholesale from the model: set every entry, then delete any managed-section key
@@ -66,30 +66,28 @@ namespace IngameScript
         public void MergeSection(string section, IEnumerable<KeyValuePair<string, string>> entries)
         {
             var wanted = new HashSet<string>();
-            foreach (var e in entries) { doc.Set(section, e.Key, e.Value); wanted.Add(e.Key); }
+            foreach (var e in entries) { doc.Set(section, e.Key, e.Value); wanted.Push(e.Key); }
 
-            keyScratch.Clear();
+            keyScratch.Empty();
             doc.KeyNames(section, keyScratch);
             foreach (var key in keyScratch)
                 if (!wanted.Contains(key)) doc.DeleteKey(section, key);
         }
 
         // Write one item's value into a user-owned section: onto the line already holding that item, even one written
-        // with the MyObjectBuilder_ prefix, else as a new line — so learning never leaves two lines for one item.
+        // with the MyObjectBuilder_ prefix, else as a new line — so learning never leaves two lines for one item. Two
+        // lookups, not a walk of the section: a learn save writes every line of a pool.
         public void SetItem(string section, string key, string value)
         {
-            keyScratch.Clear();
-            doc.KeyNames(section, keyScratch);
-            foreach (var k in keyScratch)
-                if (Category.ShortTypeId(k) == key) { doc.Set(section, k, value); return; }
-            doc.Set(section, key, value);
+            var prefixed = Category.BuilderPrefix + key;
+            doc.Set(section, doc.Get(section, key) == null && doc.Get(section, prefixed) != null ? prefixed : key, value);
         }
 
         // Add each entry whose key the section lacks, leaving every line already there as written — a bad value
         // included, since it is logged and the user's to fix. Reports whether anything was added.
         public bool AddMissing(string section, List<KeyValuePair<string, string>> entries)
         {
-            keyScratch.Clear();
+            keyScratch.Empty();
             doc.KeyNames(section, keyScratch);
             var added = false;
             foreach (var e in entries)
@@ -102,7 +100,7 @@ namespace IngameScript
         bool HasKeyIgnoringCase(string key)
         {
             foreach (var k in keyScratch)
-                if (string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) return true;
+                if (k.Is(key)) return true;
             return false;
         }
 
@@ -112,18 +110,18 @@ namespace IngameScript
         // unchanged set re-flushes to the same signature and the write can be skipped. Built only on flush (rare).
         public string Signature()
         {
-            sectionScratch.Clear();
+            sectionScratch.Empty();
             doc.SectionNames(sectionScratch);
             var sb = new System.Text.StringBuilder();
             foreach (var section in sectionScratch)
             {
                 if (!managed.Contains(section)) continue;
-                sb.Append('[').Append(section).Append(']');
-                keyScratch.Clear();
+                sb.Put('[').Put(section).Put(']');
+                keyScratch.Empty();
                 doc.KeyNames(section, keyScratch);
-                keyScratch.Sort(System.StringComparer.Ordinal);
+                keyScratch.SortOrdinal();
                 foreach (var key in keyScratch)
-                    sb.Append(key).Append('=').Append(Value(section, key)).Append(';');
+                    sb.Put(key).Put('=').Put(Value(section, key)).Put(';');
             }
             return sb.ToString();
         }

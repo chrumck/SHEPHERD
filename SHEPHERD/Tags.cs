@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace IngameScript
 {
     // The SHEPHERD-relevant meaning decoded from a block name. Grammar:
-    //   [SHEPHERD]         -> status LCD          (IsStatusLcd)
+    //   [SHEPHERD]         -> status LCD          (IsStatusLcd); on a light, the status light
     //   [SHEPHERD-DEBUG]   -> profiler LCD        (IsDebugLcd)
     //   [SHEPHERD-LOG]     -> message log LCD (IsLogLcd)
     //   [SHEPHERD:A,B]     -> accepts categories  (IsDestination, Categories); on a block without an inventory, a
@@ -22,7 +22,7 @@ namespace IngameScript
     // match case-insensitively like -Off/-Split. Category tokens are raw here; validating them against the known
     // set is Category/Routing's job. The RESERVE pool name is kept verbatim (case + spacing) — it must match the
     // Custom Data quota section name exactly, so only the RESERVE keyword itself is case-folded.
-    public sealed class TagInfo
+    public class TagInfo
     {
         public bool HasTag;
         public bool IsStatusLcd;
@@ -61,7 +61,7 @@ namespace IngameScript
                 if (open < 0) break;
                 var close = blockName.IndexOf(']', open + 1);
                 if (close < 0) break;
-                Apply(info, blockName.Substring(open + 1, close - open - 1));
+                Apply(info, blockName.Cut(open + 1, close - open - 1));
                 i = close + 1;
             }
             return info.HasTag ? info : None;
@@ -69,9 +69,9 @@ namespace IngameScript
 
         static void Apply(TagInfo info, string inner)
         {
-            if (!inner.StartsWith(Keyword, StringComparison.OrdinalIgnoreCase)) return;
+            if (!inner.StartsAnyCase(Keyword)) return;
 
-            var rest = inner.Substring(Keyword.Length);
+            var rest = inner.Cut(Keyword.Length);
             if (rest.Length == 0)
             {
                 info.HasTag = true;
@@ -84,46 +84,46 @@ namespace IngameScript
             {
                 info.HasTag = true;
                 info.IsDestination = true;
-                ParsePayload(info, rest.Substring(1));
+                ParsePayload(info, rest.Cut(1));
             }
             else if (sep == '-')
             {
-                var scope = rest.Substring(1);
-                if (string.Equals(scope, "Off", StringComparison.OrdinalIgnoreCase))
+                var scope = rest.Cut(1);
+                if (scope.Is("Off"))
                 {
                     info.HasTag = true;
                     info.IsOff = true;
                 }
-                else if (string.Equals(scope, "Split", StringComparison.OrdinalIgnoreCase))
+                else if (scope.Is("Split"))
                 {
                     info.HasTag = true;
                     info.IsSplit = true;
                 }
-                else if (string.Equals(scope, "Main", StringComparison.OrdinalIgnoreCase))
+                else if (scope.Is("Main"))
                 {
                     info.HasTag = true;
                     info.IsMain = true;
                 }
-                else if (string.Equals(scope, "Coop", StringComparison.OrdinalIgnoreCase))
+                else if (scope.Is("Coop"))
                 {
                     info.HasTag = true;
                     info.IsCoop = true;
                 }
-                else if (string.Equals(scope, "DEBUG", StringComparison.OrdinalIgnoreCase))
+                else if (scope.Is("DEBUG"))
                 {
                     info.HasTag = true;
                     info.IsDebugLcd = true;
                 }
-                else if (string.Equals(scope, "LOG", StringComparison.OrdinalIgnoreCase))
+                else if (scope.Is("LOG"))
                 {
                     info.HasTag = true;
                     info.IsLogLcd = true;
                 }
-                else if (scope.StartsWith("RESERVE", StringComparison.OrdinalIgnoreCase))
+                else if (scope.StartsAnyCase("RESERVE"))
                 {
                     // A trailing ':' peels the pool name (verbatim); nothing after RESERVE = the default pool.
                     // Any other suffix (RESERVED, RESERVEX) is a prefix collision, not a reserve tag.
-                    var after = scope.Substring("RESERVE".Length);
+                    var after = scope.Cut("RESERVE".Length);
                     if (after.Length == 0)
                     {
                         info.HasTag = true;
@@ -134,7 +134,7 @@ namespace IngameScript
                     {
                         info.HasTag = true;
                         info.IsReserve = true;
-                        info.ReservePool = after.Substring(1);
+                        info.ReservePool = after.Cut(1);
                     }
                 }
             }
@@ -149,10 +149,10 @@ namespace IngameScript
             if (lastColon >= 0)
             {
                 int priority;
-                if (TryParsePriority(payload.Substring(lastColon + 1), out priority))
+                if (TryParsePriority(payload.Cut(lastColon + 1), out priority))
                 {
                     info.Priority = priority;
-                    payload = payload.Substring(0, lastColon);
+                    payload = payload.Cut(0, lastColon);
                 }
             }
 
@@ -161,7 +161,7 @@ namespace IngameScript
                 var token = raw.Trim();
                 if (token.Length == 0) continue;
                 if (token == "*") { info.IsCatchAll = true; continue; }
-                info.Categories.Add(token);
+                info.Categories.Push(token);
             }
         }
 
@@ -170,7 +170,7 @@ namespace IngameScript
             value = 0;
             var s = segment.Trim();
             if (s.Length < 2 || s[0] != '#') return false;
-            return int.TryParse(s.Substring(1), out value);
+            return int.TryParse(s.Cut(1), out value);
         }
     }
 }

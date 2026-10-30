@@ -8,6 +8,7 @@ using VRage;
 using VRage.Game;
 using VRage.Game.ModAPI.Ingame;
 using VRage.Game.GUI.TextPanel;
+using VRageMath;
 
 namespace SHEPHERD.Tests
 {
@@ -38,9 +39,9 @@ namespace SHEPHERD.Tests
         public bool FailFetch;
         // What the script reads as its previous run's time.
         public double RunMs = 0.05;
-        // What the script reads as its instruction count so far in a run: past a tenth of the cap, so a start packs
+        // What the script reads as its instruction count so far in a run: past a quarter of the cap, so a start packs
         // no extra steps into a run unless a test lowers it.
-        public int Instructions = 10000;
+        public int Instructions = 20000;
         public string Echo { get; private set; }
         // SE appends every Echo of a run to its detail pane, so more than one shows the banner twice.
         public int MostEchoesInARun { get; private set; }
@@ -100,6 +101,11 @@ namespace SHEPHERD.Tests
 
         public string CustomData => me.Object.CustomData;
 
+        public UpdateFrequency Frequency => runtime.Object.UpdateFrequency;
+
+        // Transfers out of AddStock containers and AddTank refills attempted, moved or not.
+        public int EngineWrites;
+
         double WakeSeconds()
         {
             var f = runtime.Object.UpdateFrequency;
@@ -130,6 +136,18 @@ namespace SHEPHERD.Tests
             return frames;
         }
 
+        // A light, white as built; every colour written to it is appended to the returned list.
+        public List<Color> AddLight(string name, IMyCubeGrid grid = null)
+        {
+            var colours = new List<Color>();
+            var light = new Mock<IMyLightingBlock>();
+            Place(light, name, grid);
+            light.SetupGet(l => l.Color).Returns(() => colours.Count == 0 ? Color.White : colours[colours.Count - 1]);
+            light.SetupSet(l => l.Color = It.IsAny<Color>()).Callback<Color>(colours.Add);
+            Add(light.Object);
+            return colours;
+        }
+
         // A cargo container holding nothing, its fill reported as used / max volume.
         public void AddCargo(string name, double used, double max)
         {
@@ -152,6 +170,10 @@ namespace SHEPHERD.Tests
             inventory.SetupGet(i => i.MaxVolume).Returns((MyFixedPoint)10);
             inventory.Setup(i => i.GetItems(It.IsAny<List<MyInventoryItem>>(), It.IsAny<Func<MyInventoryItem, bool>>()))
                 .Callback<List<MyInventoryItem>, Func<MyInventoryItem, bool>>((list, keep) => list.AddRange(items));
+            inventory.Setup(i => i.TransferItemTo(It.IsAny<IMyInventory>(), It.IsAny<MyInventoryItem>(), It.IsAny<MyFixedPoint?>()))
+                .Callback(() => EngineWrites++).Returns(false);
+            inventory.Setup(i => i.TransferItemTo(It.IsAny<IMyInventory>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<bool?>(), It.IsAny<MyFixedPoint?>()))
+                .Callback(() => EngineWrites++).Returns(false);
             var cargo = new Mock<IMyCargoContainer>();
             Place(cargo, name, null);
             cargo.SetupGet(c => c.HasInventory).Returns(true);
@@ -161,14 +183,17 @@ namespace SHEPHERD.Tests
             Add(cargo.Object);
         }
 
-        // An empty gas tank: a bottle refill station.
-        public void AddTank(string name)
+        // A gas tank: a bottle refill station, empty unless it holds gas and takes bottles.
+        public void AddTank(string name, bool gas = false)
         {
             var inventory = new Mock<IMyInventory>();
+            inventory.Setup(i => i.CanItemsBeAdded(It.IsAny<MyFixedPoint>(), It.IsAny<MyItemType>())).Returns(gas);
             var tank = new Mock<IMyGasTank>();
             Place(tank, name, null);
+            tank.SetupGet(t => t.FilledRatio).Returns(gas ? 1.0 : 0.0);
             tank.SetupGet(t => t.HasInventory).Returns(true);
             tank.SetupGet(t => t.InventoryCount).Returns(1);
+            tank.Setup(t => t.RefillBottles()).Callback(() => EngineWrites++);
             tank.Setup(t => t.GetInventory(It.IsAny<int>())).Returns(inventory.Object);
             tank.Setup(t => t.GetInventory()).Returns(inventory.Object);
             Add(tank.Object);

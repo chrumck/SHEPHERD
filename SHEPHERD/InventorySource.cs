@@ -13,7 +13,7 @@ namespace IngameScript
     // Also a return target for the bottle sweep: a tank's Contents transfers a bottle back INTO an InventorySource.
     // The acceptor face carries no categories (bottles aren't routed on
     // the way back — they go to a known source) and just answers "room for one unit?".
-    public sealed class InventorySource : ISortSource, ICategoryAcceptor
+    public class InventorySource : ISortSource, ICategoryAcceptor
     {
         static readonly string[] noCategories = new string[0];
         IMyInventory inv;
@@ -45,7 +45,7 @@ namespace IngameScript
 
         public void Refresh()
         {
-            buffer.Clear();
+            buffer.Empty();
             inv.GetItems(buffer);
         }
 
@@ -147,12 +147,12 @@ namespace IngameScript
         // or vanished since Prepare returns false and moves nothing, never a stale-index mis-move. A null amount
         // moves the whole stack (SE moves what fits, remainder routes onward); a MachineFeed passes a computed
         // cap so the fill stops ON its target. An unreachable target likewise just returns false.
-        public CommitResult Commit()
+        public CommitResult Commit(bool dry)
         {
             if (pendingTarget == null) return CommitResult.ItemGone;
             var moved = pendingToFront
-                ? CommitToFront()
-                : inv.TransferItemTo(pendingTarget, pendingItem, pendingAmount);
+                ? CommitToFront(dry)
+                : !dry && inv.TransferItemTo(pendingTarget, pendingItem, pendingAmount);
             var result = moved ? CommitResult.Moved : ClassifyFailure();
             var amount = pendingAmount.HasValue ? (double)pendingAmount.Value : (double)pendingItem.Amount;
             pendingAcceptor.CompleteTransfer(amount, moved);
@@ -166,7 +166,7 @@ namespace IngameScript
         // deserves the "can't reach" warning.
         CommitResult ClassifyFailure()
         {
-            buffer.Clear();
+            buffer.Empty();
             inv.GetItems(buffer);
             foreach (var item in buffer)
                 if (item.ItemId == pendingItem.ItemId)
@@ -179,13 +179,13 @@ namespace IngameScript
         // one conveyor call stays singular). A shifted or vanished stack degrades to "no move", preserving the
         // commit-by-id safety. stackIfPossible=false keeps the arrival its own front stack rather than trusting
         // merge semantics near an explicit index; a second stack of the same ore is harmless.
-        bool CommitToFront()
+        bool CommitToFront(bool dry)
         {
-            buffer.Clear();
+            buffer.Empty();
             inv.GetItems(buffer);
             for (var i = 0; i < buffer.Count; i++)
                 if (buffer[i].ItemId == pendingItem.ItemId)
-                    return inv.TransferItemTo(pendingTarget, i, 0, false, pendingAmount);
+                    return !dry && inv.TransferItemTo(pendingTarget, i, 0, false, pendingAmount);
             return false;
         }
 

@@ -13,31 +13,22 @@ namespace IngameScript
 
     public struct Quota
     {
-        public readonly QuotaMode Mode;
-        public readonly double Target;
+        public QuotaMode Mode;
+        public double Target;
         // A trailing 'A' on the quota value: authorizes automatic production/disassembly toward the target. An
         // independent flag on top of the mode, not a fifth mode — the move semantics stay exactly the mode's.
-        public readonly bool AutomaticProduction;
-
-        public Quota(QuotaMode mode, double target) : this(mode, target, false) { }
-
-        public Quota(QuotaMode mode, double target, bool automaticProduction)
-        {
-            Mode = mode;
-            Target = target;
-            AutomaticProduction = automaticProduction;
-        }
+        public bool AutomaticProduction;
 
         public static bool TryParse(string value, out Quota quota)
         {
-            quota = new Quota(QuotaMode.Exact, 0);
+            quota = new Quota { Mode = QuotaMode.Exact };
             if (value == null) return false;
             var s = value.Trim();
             if (s.Length == 0) return false;
 
-            if (string.Equals(s, "All", System.StringComparison.OrdinalIgnoreCase))
+            if (s.Is("All"))
             {
-                quota = new Quota(QuotaMode.All, 0);
+                quota = new Quota { Mode = QuotaMode.All };
                 return true;
             }
 
@@ -46,13 +37,13 @@ namespace IngameScript
             // through to the numeric parse and is rejected.
             var auto = false;
             var last = s[s.Length - 1];
-            if (last == 'A' || last == 'a') { auto = true; s = s.Substring(0, s.Length - 1); }
-            if (auto && string.Equals(s, "All", System.StringComparison.OrdinalIgnoreCase)) return false;
+            if (last == 'A' || last == 'a') { auto = true; s = s.Cut(0, s.Length - 1); }
+            if (auto && s.Is("All")) return false;
 
             var mode = QuotaMode.Exact;
             last = s.Length > 0 ? s[s.Length - 1] : ' ';
-            if (last == 'M' || last == 'm') { mode = QuotaMode.Min; s = s.Substring(0, s.Length - 1); }
-            else if (last == 'L' || last == 'l') { mode = QuotaMode.Limit; s = s.Substring(0, s.Length - 1); }
+            if (last == 'M' || last == 'm') { mode = QuotaMode.Min; s = s.Cut(0, s.Length - 1); }
+            else if (last == 'L' || last == 'l') { mode = QuotaMode.Limit; s = s.Cut(0, s.Length - 1); }
 
             // Plain TryParse: SE runs PB scripts under InvariantCulture, so '.' is the decimal separator in-game
             // whatever the server locale (tests pin invariant to match — see Tests & profiling). To pass a culture/
@@ -62,7 +53,7 @@ namespace IngameScript
             if (!double.TryParse(s.Trim(), out target)) return false;
             if (target < 0) return false;
 
-            quota = new Quota(mode, target, auto);
+            quota = new Quota { Mode = mode, Target = target, AutomaticProduction = auto };
             return true;
         }
 
@@ -82,7 +73,7 @@ namespace IngameScript
     // (Category.Key). The count is a per-cycle snapshot (tallied across the ledger walk's ticks and swapped in whole,
     // kept live within the cycle by TookIn on each committed move in) so the intake can self-limit on counts, which
     // volume-based checks can't. Pure (no game types) so the whole self-limiting model is unit-tested offline.
-    public sealed partial class ReservePool
+    public partial class ReservePool
     {
         public readonly string Name;
         // The section's docked=true: the pool's containers live on a ship, so they are expected to come and go. Item
@@ -97,7 +88,7 @@ namespace IngameScript
         public ReservePool(string name) { Name = name; }
 
         public int QuotaCount => quotas.Count;
-        public bool TryGetQuota(string key, out Quota quota) => quotas.TryGetValue(key, out quota);
+        public bool TryGetQuota(string key, out Quota quota) => quotas.Get(key, out quota);
         // The concrete dictionary (not an interface view) so a foreach stays a struct enumerator — the production
         // ledger walks every pool's quotas when planning.
         public Dictionary<string, Quota> Quotas => quotas;
@@ -119,7 +110,7 @@ namespace IngameScript
             {
                 string cat;
                 if (overrides == null || !overrides.TryGet(key, out cat)) cat = Category.ForKey(key);
-                if (!set.Contains(cat)) set.Add(cat);
+                if (!set.Contains(cat)) set.Push(cat);
             }
             categories = set.ToArray();
         }
@@ -141,14 +132,14 @@ namespace IngameScript
         // The recount spans several ticks, and a render between them must not show a half-counted pool: it builds
         // aside and replaces the live count in one swap. Only quota items count for a configured pool (the rest are
         // irrelevant to the deficit); everything counts for an unconfigured one, so its levels LCD can list them.
-        public void BeginTally() => tally.Clear();
+        public void BeginTally() => tally.Empty();
 
         public void Tally(string key, double amount)
         {
             Quota q;
             double have;
-            if (quotas.Count == 0 || quotas.TryGetValue(key, out q))
-                tally[key] = (tally.TryGetValue(key, out have) ? have : 0) + amount;
+            if (quotas.Count == 0 || quotas.Get(key, out q))
+                tally[key] = (tally.Get(key, out have) ? have : 0) + amount;
         }
 
         public void CommitTally()
@@ -161,7 +152,7 @@ namespace IngameScript
         public void TookIn(string key, double amount)
         {
             double have;
-            counts[key] = (counts.TryGetValue(key, out have) ? have : 0) + amount;
+            counts[key] = (counts.Get(key, out have) ? have : 0) + amount;
         }
 
         // Drop the count when the excess of an over-target item is drained out, so a sibling container in the same
@@ -169,7 +160,7 @@ namespace IngameScript
         public void TookOut(string key, double amount)
         {
             double have;
-            var left = (counts.TryGetValue(key, out have) ? have : 0) - amount;
+            var left = (counts.Get(key, out have) ? have : 0) - amount;
             counts[key] = left < 0 ? 0 : left;
         }
 
@@ -178,7 +169,7 @@ namespace IngameScript
         public double Deficit(string key)
         {
             Quota q;
-            if (!quotas.TryGetValue(key, out q)) return 0;
+            if (!quotas.Get(key, out q)) return 0;
             if (q.Mode == QuotaMode.All) return double.MaxValue;
 
             var have = Count(key);
@@ -192,7 +183,7 @@ namespace IngameScript
         public double Excess(string key)
         {
             Quota q;
-            if (!quotas.TryGetValue(key, out q)) return 0;
+            if (!quotas.Get(key, out q)) return 0;
             if (q.Mode == QuotaMode.All) return 0;
 
             var have = Count(key);
@@ -219,7 +210,7 @@ namespace IngameScript
         public double Count(string key)
         {
             double have;
-            return counts.TryGetValue(key, out have) ? have : 0;
+            return counts.Get(key, out have) ? have : 0;
         }
 
         public static string Label(string name) => name.Length == 0 ? "(default)" : name;
@@ -228,14 +219,14 @@ namespace IngameScript
         // it: whichever holds it keeps it, and the other never fills. Nothing else would ever tell the user.
         public static void SharedAll(Dictionary<string, ReservePool> pools, Dictionary<string, string> firstPool, StateChannel into)
         {
-            firstPool.Clear();
+            firstPool.Empty();
             foreach (var pool in pools.Values)
                 foreach (var pair in pool.quotas)
                 {
                     if (pair.Value.Mode != QuotaMode.All) continue;
                     string first;
-                    if (!firstPool.TryGetValue(pair.Key, out first)) firstPool[pair.Key] = pool.Name;
-                    else into.Add("reserves " + Label(first) + " and " + Label(pool.Name) + " both want All of " + pair.Key + " - only one fills");
+                    if (!firstPool.Get(pair.Key, out first)) firstPool[pair.Key] = pool.Name;
+                    else into.Push("reserves " + Label(first) + " and " + Label(pool.Name) + " both want All of " + pair.Key + " - only one fills");
                 }
         }
     }

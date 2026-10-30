@@ -6,15 +6,14 @@ namespace IngameScript
     // One learned reserve line, ready to write into the user's [Reserve] / [Reserve:Name] section.
     public struct QuotaLine
     {
-        public readonly string Section, Key, Value;
-        public QuotaLine(string section, string key, string value) { Section = section; Key = key; Value = value; }
+        public string Section, Key, Value;
     }
 
     // Infers category overrides and reserve quotas from where the user has put items (learn mode). One sweep is Begin,
     // a Teach call per stack read from a teacher container, then Finish against the current config, which leaves the
     // pending changes and their preview lines. Each sweep starts from nothing, so an item moved away between sweeps
     // simply drops out of the preview. Absence never removes anything: only a placement teaches.
-    public sealed partial class PlacementLearner
+    public partial class PlacementLearner
     {
         // Item key -> the distinct tokens it was found under, its own built-in category included.
         readonly Dictionary<string, List<string>> placed = new Dictionary<string, List<string>>();
@@ -41,47 +40,47 @@ namespace IngameScript
 
         public void Begin()
         {
-            foreach (var list in placed.Values) { list.Clear(); spareTokens.Add(list); }
-            placed.Clear();
-            atBuiltIn.Clear();
-            foreach (var counts in stocked.Values) { counts.Clear(); spareCounts.Add(counts); }
-            stocked.Clear();
-            taughtAtHome.Clear();
+            foreach (var list in placed.Values) { list.Empty(); spareTokens.Push(list); }
+            placed.Empty();
+            atBuiltIn.Empty();
+            foreach (var counts in stocked.Values) { counts.Empty(); spareCounts.Push(counts); }
+            stocked.Empty();
+            taughtAtHome.Empty();
         }
 
         // A stack of item `key` sits in a single-category container tagged `token`; builtIn is the item's own bucket.
         public void TeachCategory(string token, string key, string builtIn)
         {
-            if (token == builtIn) atBuiltIn.Add(key);
+            if (token == builtIn) atBuiltIn.Push(key);
             List<string> tokens;
-            if (!placed.TryGetValue(key, out tokens))
+            if (!placed.Get(key, out tokens))
             {
                 tokens = Take(spareTokens) ?? new List<string>();
                 placed[key] = tokens;
             }
-            if (!tokens.Contains(token)) tokens.Add(token);
+            if (!tokens.Contains(token)) tokens.Push(token);
         }
 
         public void TeachReserve(string pool, string key, double amount, bool docked = false)
         {
-            if (!docked) taughtAtHome.Add(pool);
+            if (!docked) taughtAtHome.Push(pool);
             Dictionary<string, double> counts;
-            if (!stocked.TryGetValue(pool, out counts))
+            if (!stocked.Get(pool, out counts))
             {
                 counts = Take(spareCounts) ?? new Dictionary<string, double>();
                 stocked[pool] = counts;
             }
             double have;
-            counts[key] = (counts.TryGetValue(key, out have) ? have : 0.0) + amount;
+            counts[key] = (counts.Get(key, out have) ? have : 0.0) + amount;
         }
 
         public void Finish(CategoryOverrides current, Dictionary<string, ReservePool> config)
         {
-            CategorySets.Clear();
-            CategoryRemovals.Clear();
-            QuotaLines.Clear();
-            conflicts.Clear();
-            Lines.Clear();
+            CategorySets.Empty();
+            CategoryRemovals.Empty();
+            QuotaLines.Empty();
+            conflicts.Empty();
+            Lines.Empty();
             string was;
 
             Sorted(placed.Keys, keys);
@@ -90,18 +89,18 @@ namespace IngameScript
                 var tokens = placed[key];
                 // An item in two categories — its own built-in included — is ambiguous, so it teaches nothing until
                 // every stack of it sits in one.
-                if (tokens.Count > 1) { conflicts.Add("conflict " + key + ": " + string.Join(", ", tokens)); continue; }
+                if (tokens.Count > 1) { conflicts.Push("conflict " + key + ": " + string.Join(", ", tokens)); continue; }
                 if (atBuiltIn.Contains(key) || current.TryGet(key, out was) && was == tokens[0]) continue;
-                CategorySets.Add(new KeyValuePair<string, string>(key, tokens[0]));
-                Lines.Add("learn " + key + " -> " + tokens[0]);
+                CategorySets.Push(new KeyValuePair<string, string>(key, tokens[0]));
+                Lines.Push("learn " + key + " -> " + tokens[0]);
             }
 
             Sorted(atBuiltIn, keys);
             foreach (var key in keys)
             {
                 if (placed[key].Count > 1 || !current.TryGet(key, out was)) continue;
-                CategoryRemovals.Add(key);
-                Lines.Add("learn " + key + " -> built-in");
+                CategoryRemovals.Push(key);
+                Lines.Push("learn " + key + " -> built-in");
             }
 
             Sorted(stocked.Keys, pools);
@@ -109,32 +108,32 @@ namespace IngameScript
             {
                 var section = pool.Length == 0 ? "Reserve" : "Reserve:" + pool;
                 ReservePool known;
-                config.TryGetValue(pool, out known);
+                config.Get(pool, out known);
                 // A pool taught only from docked ships is a ship's loadout, so its section says so.
                 if (!taughtAtHome.Contains(pool) && (known == null || !known.Docked))
                 {
-                    QuotaLines.Add(new QuotaLine(section, ReservePool.DockedKey, "true"));
-                    Lines.Add("learn " + section + " " + ReservePool.DockedKey + "=true");
+                    QuotaLines.Push(new QuotaLine { Section = section, Key = ReservePool.DockedKey, Value = "true" });
+                    Lines.Push("learn " + section + " " + ReservePool.DockedKey + "=true");
                 }
                 Sorted(stocked[pool].Keys, keys);
                 foreach (var key in keys)
                 {
                     var amount = stocked[pool][key];
                     // A new key is a plain (exact) line; its stand-in target of -1 can never equal a learned amount.
-                    var q = new Quota(QuotaMode.Exact, -1);
-                    if (known != null && !known.TryGetQuota(key, out q)) q = new Quota(QuotaMode.Exact, -1);
+                    var q = new Quota { Mode = QuotaMode.Exact, Target = -1 };
+                    if (known != null && !known.TryGetQuota(key, out q)) q = new Quota { Mode = QuotaMode.Exact, Target = -1 };
                     var value = q.WithAmount(amount);
                     // An amount the line already allows teaches nothing: M is a floor, so more is fine, and L a
                     // ceiling, so less is.
                     if (value == null || value == q.WithAmount(q.Target)
                         || q.Mode == QuotaMode.Min && amount > q.Target || q.Mode == QuotaMode.Limit && amount < q.Target) continue;
-                    QuotaLines.Add(new QuotaLine(section, key, value));
-                    Lines.Add("learn " + section + " " + key + "=" + value);
+                    QuotaLines.Push(new QuotaLine { Section = section, Key = key, Value = value });
+                    Lines.Push("learn " + section + " " + key + "=" + value);
                 }
             }
 
             Lines.AddRange(conflicts);
-            if (Lines.Count == 0) Lines.Add("learning - nothing to save yet");
+            if (Lines.Count == 0) Lines.Push("learning - nothing to save yet");
         }
 
         public void Apply(CategoryOverrides overrides)
@@ -154,9 +153,9 @@ namespace IngameScript
         // Sorted, so the preview doesn't reorder itself from sweep to sweep.
         static void Sorted(IEnumerable<string> from, List<string> into)
         {
-            into.Clear();
+            into.Empty();
             into.AddRange(from);
-            into.Sort(StringComparer.Ordinal);
+            into.SortOrdinal();
         }
     }
 }

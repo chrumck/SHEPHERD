@@ -11,7 +11,7 @@ namespace IngameScript
     // prunes whatever its own set no longer asserts, so mixing cadences in one channel would prune each other.
     // Several channels may share a cadence (they prune independently); a channel is status-visible only if its
     // Current is handed to the renderer, which is how a log-only diagnostic stays log-only.
-    public sealed class StateChannel
+    public class StateChannel
     {
         readonly Action<string> log;
         readonly List<string> current = new List<string>();
@@ -21,14 +21,14 @@ namespace IngameScript
 
         public List<string> Current => current;
 
-        public void Begin() => current.Clear();
+        public void Begin() => current.Empty();
         // Null tolerated so a caller can pass an optional status straight through.
-        public void Add(string message) { if (message != null) current.Add(message); }
+        public void Push(string message) { if (message != null) current.Push(message); }
 
         public void Commit()
         {
             foreach (var message in current)
-                if (!active.Contains(message)) { active.Add(message); log(message); }
+                if (!active.Contains(message)) { active.Push(message); log(message); }
             for (var i = active.Count - 1; i >= 0; i--)
                 if (!current.Contains(active[i])) active.RemoveAt(i);
         }
@@ -37,17 +37,17 @@ namespace IngameScript
     // A bounded rolling buffer of the most recent diagnostic lines behind the [SHEPHERD-LOG] surface. Add drops
     // the oldest line past capacity. The Dirty flag lets the renderer rewrite the surface only when the content
     // changed, not every tick.
-    public sealed partial class MessageLog
+    public partial class MessageLog
     {
         readonly List<string> lines = new List<string>();
         readonly int capacity;
 
         public MessageLog(int capacity) { this.capacity = capacity > 0 ? capacity : 1; }
 
-        public bool Dirty { get; private set; }
-        public void Add(string line)
+        public bool Dirty;
+        public void Push(string line)
         {
-            lines.Add(line ?? "");
+            lines.Push(line ?? "");
             if (lines.Count > capacity) lines.RemoveAt(0);
             Dirty = true;
         }
@@ -55,8 +55,8 @@ namespace IngameScript
         // Newest first, so the latest message stays visible at the top of a fixed-height panel.
         public void Render(StringBuilder sb)
         {
-            sb.Clear();
-            for (var i = lines.Count - 1; i >= 0; i--) sb.AppendLine(lines[i]);
+            sb.Empty();
+            for (var i = lines.Count - 1; i >= 0; i--) sb.Line(lines[i]);
         }
 
         public void ClearDirty() => Dirty = false;

@@ -104,8 +104,8 @@ namespace SHEPHERD.Tests
         public void ActionLinesShowOnStatusAndNeverReachTheLog()
         {
             // Current work changes amount every plan, so logging it would turn the history into a per-cycle stream.
-            craft.Actions.Add(new CraftAction(CraftActionKind.AppendAssembly, null, "bp", 70.0, Item));
-            craft.Actions.Add(new CraftAction(CraftActionKind.AppendDisassembly, null, "bp", 5.0, Item));
+            craft.Actions.Add(new CraftAction { Kind = CraftActionKind.AppendAssembly, Blueprint = "bp", Amount = 70.0, Item = Item });
+            craft.Actions.Add(new CraftAction { Kind = CraftActionKind.AppendDisassembly, Blueprint = "bp", Amount = 5.0, Item = Item });
             refine.Requests.Add(new FeedRequest(Ore, "Ingot/Modium", 100.0));
             Compose();
             Assert.Equal(new[]
@@ -150,7 +150,7 @@ namespace SHEPHERD.Tests
             public AssemblerMark Mark { get; private set; }
             public bool CanCooperate => true;
             public bool Cooperative => false;
-            public void SetCooperative(bool on) { }
+            public void SetCooperative(bool on, bool dry) { }
         }
 
         [Fact]

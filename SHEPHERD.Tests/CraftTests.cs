@@ -29,7 +29,11 @@ namespace SHEPHERD.Tests
             public AssemblerMark Mark { get; set; } = AssemblerMark.Main;
             public bool CanCooperate { get; set; } = true;
             public bool Cooperative { get; set; }
-            public void SetCooperative(bool on) => Cooperative = on;
+            public void SetCooperative(bool on, bool dry)
+            {
+                if (dry) { DryCalls++; return; }
+                Cooperative = on;
+            }
             string model;
             public string Model { get { return model ?? "M" + Id; } set { model = value; } }
             public double Speed { get; set; } = 1;
@@ -46,7 +50,7 @@ namespace SHEPHERD.Tests
 
             public Assembler Enqueue(string blueprint, double amount)
             {
-                Queue.Add(new QueueEntry(blueprint, amount));
+                Queue.Add(new QueueEntry { Blueprint = blueprint, Amount = amount });
                 return this;
             }
 
@@ -64,32 +68,38 @@ namespace SHEPHERD.Tests
                 return usable == null || usable.Contains(blueprint);
             }
 
-            public void Append(string blueprint, double amount)
+            public int DryCalls;
+
+            public void Append(string blueprint, double amount, bool dry)
             {
-                Queue.Add(new QueueEntry(blueprint, amount));
+                if (dry) { DryCalls++; return; }
+                Queue.Add(new QueueEntry { Blueprint = blueprint, Amount = amount });
                 Mutations.Add("append " + blueprint + " " + amount);
             }
 
-            public void SetDisassembling(bool on)
+            public void SetDisassembling(bool on, bool dry)
             {
+                if (dry) { DryCalls++; return; }
                 if (IsDisassembling != on) Mutations.Add(on ? "disassembly" : "assembly");
                 IsDisassembling = on;
             }
 
-            public void ClearQueue()
+            public void ClearQueue(bool dry)
             {
+                if (dry) { DryCalls++; return; }
                 Queue.Clear();
                 Mutations.Add("clear");
             }
 
-            public double Trim(string blueprint, double amount)
+            public double Trim(string blueprint, double amount, bool dry)
             {
+                if (dry) { DryCalls++; return 0; }
                 for (var i = Queue.Count - 1; i >= 0; i--)
                 {
                     if (Queue[i].Blueprint != blueprint) continue;
                     amount = System.Math.Min(amount, Queue[i].Amount - (i == 0 ? 1 : 0));
                     if (amount < 1) return 0;
-                    Queue[i] = new QueueEntry(blueprint, Queue[i].Amount - amount);
+                    Queue[i] = new QueueEntry { Blueprint = blueprint, Amount = Queue[i].Amount - amount };
                     if (Queue[i].Amount == 0) Queue.RemoveAt(i);
                     Mutations.Add("trim " + blueprint + " " + amount);
                     return amount;
@@ -154,10 +164,27 @@ namespace SHEPHERD.Tests
             public void Execute()
             {
                 var job = new CraftJob();
-                job.Rearm(Planner);
+                job.Rearm(Planner, Planner.Actions);
                 var guard = 0;
                 while (job.Step() != StepResult.Done) Assert.True(++guard < 100);
             }
+        }
+
+        [Fact]
+        public void ADryJobMakesNoneOfItsActions()
+        {
+            var rig = new Rig();
+            var a = new Assembler(1).Enqueue(PlateBp, 5);
+            var actions = new List<CraftAction>();
+            for (var k = CraftActionKind.AppendAssembly; k <= CraftActionKind.Trim; k++)
+                actions.Add(new CraftAction { Kind = k, Assembler = a, Blueprint = PlateBp, Amount = 2, Item = "" });
+            var job = new CraftJob { Dry = true };
+            job.Rearm(rig.Planner, actions);
+            while (job.Step() != StepResult.Done) { }
+
+            Assert.Empty(a.Mutations);
+            Assert.Equal(7, a.DryCalls);
+            Assert.Equal(5, a.Queue[0].Amount);
         }
 
         [Fact]
@@ -463,7 +490,7 @@ namespace SHEPHERD.Tests
             rig.Ledger.AddStock(Plate, 500);
             rig.Plan();
             var job = new CraftJob();
-            job.Rearm(rig.Planner);
+            job.Rearm(rig.Planner, rig.Planner.Actions);
             Assert.Equal(StepResult.Moved, job.Step());
             Assert.Equal(new[] { "disassembly" }, idle.Mutations);
             Assert.Equal(StepResult.Moved, job.Step());
@@ -651,7 +678,7 @@ namespace SHEPHERD.Tests
         {
             var amount = 0.0;
             foreach (var entry in a.Queue) amount += entry.Amount;
-            return new AssemblerSnapshot(a, a.Queue.Count == 0, amount, a.Speed);
+            return new AssemblerSnapshot { State = a, QueueEmpty = a.Queue.Count == 0, QueueAmount = amount, Speed = a.Speed };
         }
 
         static bool Clears(CraftPlanner planner, long id)
@@ -676,7 +703,7 @@ namespace SHEPHERD.Tests
             Assert.Equal("clearing stalled disassembly queue on A7", rig.Planner.StalledQueueStatus);
             Assert.True(Clears(rig.Planner, 7));
             var job = new CraftJob();
-            job.Rearm(rig.Planner);
+            job.Rearm(rig.Planner, rig.Planner.Actions);
             while (job.Step() != StepResult.Done) { }
             Assert.Empty(a.Queue);
             Assert.Equal(new[] { "clear" }, a.Mutations);
@@ -692,7 +719,7 @@ namespace SHEPHERD.Tests
             rig.Planner.TrackedDisassembler = 7;
             rig.Plan(0.0);
             rig.Plan(120.0);
-            a.ClearQueue();
+            a.ClearQueue(false);
             rig.Snapshots[0] = SnapshotOf(a);
             rig.Plan(121.0);
             Assert.Null(rig.Planner.StalledQueueStatus);
@@ -724,7 +751,7 @@ namespace SHEPHERD.Tests
             var rig = new Rig().Snapshot(a);
             rig.Planner.TrackedDisassembler = 7;
             rig.Plan(0.0);
-            a.Queue[0] = new QueueEntry(PlateBp, 9);
+            a.Queue[0] = new QueueEntry { Blueprint = PlateBp, Amount = 9 };
             rig.Snapshots[0] = SnapshotOf(a);
             rig.Plan(121.0);
             Assert.Null(rig.Planner.StalledQueueStatus);
@@ -1136,7 +1163,7 @@ namespace SHEPHERD.Tests
             Assert.Same(main, trim.Assembler);
             Assert.Equal(70, trim.Amount);
             rig.Execute();
-            Assert.Equal(new[] { new QueueEntry(PlateBp, 20) }, main.Queue);
+            Assert.Equal(new[] { new QueueEntry { Blueprint = PlateBp, Amount = 20 } }, main.Queue);
             rig.Recount(100).Plan();
             Assert.Empty(rig.Planner.Actions);
         }
@@ -1162,7 +1189,7 @@ namespace SHEPHERD.Tests
             rig.Recount(100).Plan();
             Assert.Equal(69, TrimOf(rig.Planner).Amount);
             rig.Execute();
-            Assert.Equal(new[] { new QueueEntry(PlateBp, 1) }, main.Queue);
+            Assert.Equal(new[] { new QueueEntry { Blueprint = PlateBp, Amount = 1 } }, main.Queue);
         }
 
         [Fact]
@@ -1201,7 +1228,7 @@ namespace SHEPHERD.Tests
             rig.Execute();
             main.Enqueue(PlateBp, 500);                      // the player's order, queued after SHEPHERD's 70
             rig.Recount(30).Plan();
-            main.Queue[0] = new QueueEntry(PlateBp, 10);     // 60 of SHEPHERD's built
+            main.Queue[0] = new QueueEntry { Blueprint = PlateBp, Amount = 10 };     // 60 of SHEPHERD's built
             rig.Recount(100).Plan();
             Assert.Equal(10, TrimOf(rig.Planner).Amount);
             rig.Execute();
@@ -1215,7 +1242,7 @@ namespace SHEPHERD.Tests
             var rig = new Rig().Quota(Plate, "100A").Snapshot(main);
             rig.Recount(0).Plan();
             rig.Execute();                                   // SHEPHERD's 50, behind the player's 50
-            main.Queue[0] = new QueueEntry(PlateBp, 10);     // 40 of the player's built
+            main.Queue[0] = new QueueEntry { Blueprint = PlateBp, Amount = 10 };     // 40 of the player's built
             rig.Recount(100).Plan();
             rig.Recount(100).Plan();
             Assert.Equal(50, TrimOf(rig.Planner).Amount);
@@ -1247,7 +1274,7 @@ namespace SHEPHERD.Tests
             Assert.Same(mine, trim.Assembler);
             Assert.Equal(50, trim.Amount);
             rig.Execute();
-            Assert.Equal(new[] { new QueueEntry(PlateBp, 50) }, mine.Queue);
+            Assert.Equal(new[] { new QueueEntry { Blueprint = PlateBp, Amount = 50 } }, mine.Queue);
         }
 
         [Fact]
@@ -1308,7 +1335,7 @@ namespace SHEPHERD.Tests
             rig.Recount(3459).Plan();
             Assert.Equal(3169, TrimOf(rig.Planner).Amount);
             rig.Execute();
-            Assert.Equal(new[] { new QueueEntry(PlateBp, 659) }, ship.Queue);
+            Assert.Equal(new[] { new QueueEntry { Blueprint = PlateBp, Amount = 659 } }, ship.Queue);
         }
     }
 }

@@ -23,19 +23,19 @@ namespace IngameScript
         {
             if (string.IsNullOrEmpty(token) || into.Contains(token)) return;
             foreach (var builtIn in All) if (builtIn == token) return;
-            into.Add(token);
+            into.Push(token);
         }
     }
 
     public static class Category
     {
-        const string BuilderPrefix = "MyObjectBuilder_";
+        public const string BuilderPrefix = "MyObjectBuilder_";
 
         public static string ShortTypeId(string typeId) =>
             string.IsNullOrEmpty(typeId) ?
                 "" :
-                typeId.StartsWith(BuilderPrefix, StringComparison.Ordinal) ?
-                typeId.Substring(BuilderPrefix.Length) :
+                typeId.Starts(BuilderPrefix) ?
+                typeId.Cut(BuilderPrefix.Length) :
                 typeId;
 
         // The stable per-item key used by reserve quotas and (later) the persisted stores: ShortTypeId/SubtypeId,
@@ -50,10 +50,10 @@ namespace IngameScript
         public static string ForKey(string key)
         {
             string cat;
-            if (!builtIns.TryGetValue(key, out cat))
+            if (!builtIns.Get(key, out cat))
             {
                 var slash = key.IndexOf('/');
-                builtIns[key] = cat = For(slash >= 0 ? key.Substring(0, slash) : key);
+                builtIns[key] = cat = For(slash >= 0 ? key.Cut(0, slash) : key);
             }
             return cat;
         }
@@ -97,12 +97,12 @@ namespace IngameScript
             key != null && key.IndexOf('/') > 0
             && !string.IsNullOrEmpty(value) && value.Trim().Length > 0;
 
-        // A cheap TypeId prefilter for the bottle sweep, so it doesn't probe CanItemsBeAdded against every
-        // unrelated Tools item (guns, tools) just to find bottles.
+        // A cheap prefilter for the bottle sweep, so it doesn't offer every tank each unrelated item just to find
+        // bottles. Takes a TypeId or an item key.
         public static bool IsBottle(string typeId)
         {
             var t = ShortTypeId(typeId);
-            return t == "GasContainerObject" || t == "OxygenContainerObject";
+            return t.Starts("GasContainerObject") || t.Starts("OxygenContainerObject");
         }
     }
 
@@ -110,7 +110,7 @@ namespace IngameScript
     // may be a built-in or a custom token. Seeded from the persisted [Categories] section at load and consulted
     // ahead of the coarse bucket when routing. Pure (no game types) so it is offline-tested; the source of
     // truth is memory, disk is a mirror written on change.
-    public sealed partial class CategoryOverrides
+    public partial class CategoryOverrides
     {
         readonly Dictionary<string, string> map = new Dictionary<string, string>();
 
@@ -119,7 +119,7 @@ namespace IngameScript
         // Lookups use the prefix-free key, so a hand-written MyObjectBuilder_ key is normalized here or it never matches.
         public void Set(string key, string category) => map[Category.ShortTypeId(key)] = category;
         public bool Remove(string key) => map.Remove(key);
-        public void Clear() => map.Clear();
-        public bool TryGet(string key, out string category) => map.TryGetValue(key, out category);
+        public void Clear() => map.Empty();
+        public bool TryGet(string key, out string category) => map.Get(key, out category);
     }
 }

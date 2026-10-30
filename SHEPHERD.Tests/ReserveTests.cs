@@ -154,8 +154,8 @@ namespace SHEPHERD.Tests
         public void DeficitAddModesBelowTarget()
         {
             var pool = new ReservePool("Ammo");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
-            pool.SetQuota("Ingot/Gold", new Quota(QuotaMode.Min, 50));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
+            pool.SetQuota("Ingot/Gold", new Quota { Mode = QuotaMode.Min, Target = 50 });
             pool.SetCount("Ingot/Iron", 30);
             pool.SetCount("Ingot/Gold", 10);
             Assert.Equal(70, pool.Deficit("Ingot/Iron"));
@@ -166,8 +166,8 @@ namespace SHEPHERD.Tests
         public void DeficitZeroAtOrAboveTarget()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
-            pool.SetQuota("Ingot/Gold", new Quota(QuotaMode.Limit, 50));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
+            pool.SetQuota("Ingot/Gold", new Quota { Mode = QuotaMode.Limit, Target = 50 });
             pool.SetCount("Ingot/Iron", 100);
             pool.SetCount("Ingot/Gold", 60);
             Assert.Equal(0, pool.Deficit("Ingot/Iron"));
@@ -178,7 +178,7 @@ namespace SHEPHERD.Tests
         public void LimitPullsUpToTargetLikeExact()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Gold", new Quota(QuotaMode.Limit, 50));
+            pool.SetQuota("Ingot/Gold", new Quota { Mode = QuotaMode.Limit, Target = 50 });
             pool.SetCount("Ingot/Gold", 10);
             Assert.Equal(40, pool.Deficit("Ingot/Gold"));
         }
@@ -189,7 +189,7 @@ namespace SHEPHERD.Tests
         public void QuotaKeyMatchesWithOrWithoutBuilderPrefix(string written)
         {
             var pool = new ReservePool("P");
-            pool.SetQuota(written, new Quota(QuotaMode.Exact, 100));
+            pool.SetQuota(written, new Quota { Mode = QuotaMode.Exact, Target = 100 });
             pool.SetCount(Category.Key("MyObjectBuilder_Ingot", "Iron"), 30);
             Assert.Equal(70, pool.Deficit("Ingot/Iron"));
         }
@@ -205,8 +205,8 @@ namespace SHEPHERD.Tests
         public void ExcessRemoveModesAboveTarget()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
-            pool.SetQuota("Ingot/Gold", new Quota(QuotaMode.Limit, 50));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
+            pool.SetQuota("Ingot/Gold", new Quota { Mode = QuotaMode.Limit, Target = 50 });
             pool.SetCount("Ingot/Iron", 130);
             pool.SetCount("Ingot/Gold", 80);
             Assert.Equal(30, pool.Excess("Ingot/Iron"));
@@ -217,7 +217,7 @@ namespace SHEPHERD.Tests
         public void ExcessCountsAMinSurplusButNothingWithoutAQuota()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Min, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Min, Target = 100 });
             pool.SetCount("Ingot/Iron", 300);
             Assert.Equal(200, pool.Excess("Ingot/Iron"));   // where it may go is the source's call
             Assert.Equal(0, pool.Excess("Ingot/Gold"));
@@ -227,7 +227,7 @@ namespace SHEPHERD.Tests
         public void TookInReducesDeficit()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Min, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Min, Target = 100 });
             pool.SetCount("Ingot/Iron", 30);
             Assert.Equal(70, pool.Deficit("Ingot/Iron"));
             pool.TookIn("Ingot/Iron", 40);
@@ -238,7 +238,7 @@ namespace SHEPHERD.Tests
         public void AllAlwaysHasDeficitNeverExcess()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.All, 0));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.All });
             pool.SetCount("Ingot/Iron", 1000000);
             Assert.True(pool.Deficit("Ingot/Iron") > 0);
             Assert.Equal(0, pool.Excess("Ingot/Iron"));
@@ -287,7 +287,7 @@ namespace SHEPHERD.Tests
         public void TallyIsInvisibleUntilCommitted()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
             pool.SetCount("Ingot/Iron", 100);
             pool.BeginTally();
             pool.Tally("Ingot/Iron", 30);
@@ -301,7 +301,7 @@ namespace SHEPHERD.Tests
         public void TookInAfterCommitAddsToTheNewCount()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
             pool.SetCount("Ingot/Iron", 90);
             pool.BeginTally();
             pool.Tally("Ingot/Iron", 20);
@@ -326,7 +326,7 @@ namespace SHEPHERD.Tests
         public void ConfiguredPoolTalliesOnlyQuotaItems()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
             pool.BeginTally();
             pool.Tally("Ingot/Iron", 10);
             pool.Tally("Ore/Stone", 500);
@@ -351,7 +351,7 @@ namespace SHEPHERD.Tests
         public void TookOutReducesExcess()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
             pool.SetCount("Ingot/Iron", 130);
             Assert.Equal(30, pool.Excess("Ingot/Iron"));
             pool.TookOut("Ingot/Iron", 30);
@@ -363,7 +363,7 @@ namespace SHEPHERD.Tests
         public void TookOutClampsAtZero()
         {
             var pool = new ReservePool("P");
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Limit, 50));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Limit, Target = 50 });
             pool.SetCount("Ingot/Iron", 60);
             pool.TookOut("Ingot/Iron", 999);              // a short commit can over-request; count never goes negative
             Assert.Equal(0, pool.Excess("Ingot/Iron"));
@@ -374,10 +374,10 @@ namespace SHEPHERD.Tests
         {
             var pool = new ReservePool("Quotas");
             Assert.True(pool.AllAutomatic());
-            pool.SetQuota("Component/SteelPlate", new Quota(QuotaMode.Min, 500, true));
-            pool.SetQuota("Component/Motor", new Quota(QuotaMode.Exact, 50, true));
+            pool.SetQuota("Component/SteelPlate", new Quota { Mode = QuotaMode.Min, Target = 500, AutomaticProduction = true });
+            pool.SetQuota("Component/Motor", new Quota { Mode = QuotaMode.Exact, Target = 50, AutomaticProduction = true });
             Assert.True(pool.AllAutomatic());
-            pool.SetQuota("Ingot/Iron", new Quota(QuotaMode.Exact, 100));
+            pool.SetQuota("Ingot/Iron", new Quota { Mode = QuotaMode.Exact, Target = 100 });
             Assert.False(pool.AllAutomatic());
         }
 
@@ -389,7 +389,7 @@ namespace SHEPHERD.Tests
             Assert.Equal("800MA", q.WithAmount(800));
             Assert.True(Quota.TryParse("100L", out q));
             Assert.Equal("12.5L", q.WithAmount(12.5));
-            Assert.Equal("12345.68", new Quota(QuotaMode.Exact, 0).WithAmount(12345.678));
+            Assert.Equal("12345.68", new Quota { Mode = QuotaMode.Exact }.WithAmount(12345.678));
             Assert.True(Quota.TryParse("All", out q));
             Assert.Null(q.WithAmount(5));
         }

@@ -59,7 +59,7 @@ Everything is driven by block names. The `SHEPHERD` keyword and the word after i
 | `[SHEPHERD-Split]` | On a connector: nothing beyond it is managed (see **Docked ships**). |
 | `[SHEPHERD-RESERVE]`, `[SHEPHERD-RESERVE:Name]` | Reserve-pool container (see **Reserve pools**). |
 | `[SHEPHERD-Main]`, `[SHEPHERD-Coop]` | The assembler SHEPHERD crafts on, and the ones that help it (see **Assembler modes**). |
-| `[SHEPHERD]`, `[SHEPHERD-LOG]`, `[SHEPHERD-DEBUG]` | Status, log and run-time screens (see **Displays**). |
+| `[SHEPHERD]`, `[SHEPHERD-LOG]`, `[SHEPHERD-DEBUG]` | Status, log and run-time screens; `[SHEPHERD]` on a light makes it a status light (see **Displays**). |
 
 A container tag or reserve tag on a block **without an inventory** (an LCD) makes it a stock or levels screen
 instead.
@@ -104,10 +104,11 @@ Component/Explosives=Explosives
 ## Displays
 
 Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[SHEPHERD-LOG]` and
-`[SHEPHERD-DEBUG]` found are used; levels and stock screens can be as many as you like.
+`[SHEPHERD-DEBUG]` found are used; levels and stock screens can be as many as you like. `[SHEPHERD]` on a light
+makes a status light instead (item 6), as many as you like.
 
-1. **`[SHEPHERD]` — status.** Version, health (`working` / `idle` / `learning` / `standing by` /
-   `HALTED`), the programmable block drawing it, a ticking clock, how many tagged assemblers it controls — those
+1. **`[SHEPHERD]` — status.** Version, health (`working` / `idle` / `learning` / `standing by` / `HALTED`),
+   the programmable block drawing it, a ticking clock, how many tagged assemblers it controls — those
    switched on and functional, none while the tags have a problem (`3 Assemblers Controlled`, plus
    `, one disassembling` while one is lent to disassembly) — and a fill bar per category (`──catch-all──` when only
    a catch-all takes it, `──no route──` when nothing does), for the catch-all and per reserve pool. Below the rule:
@@ -128,7 +129,15 @@ Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[S
 2. **`[SHEPHERD-LOG]` — history.** The same lines timestamped, except the "doing it" ones, each logged once when it appears, plus
    events (started, learned a recipe, stood down, bad config line). A few diagnostics are log-only, such as
    a category with no container (the status panel already shows `──no route──`), and `no run for 12.3 s (wall
-   12.5 s)` when the server left the block unrun for over 5 s of game time.
+   12.5 s)` when the server left the block unrun for over 5 s of game time (after a restart or a login, until the owner
+   has finished loading in, or while the owner's grids were frozen offline).
+   `slow (othr sort+status 2.104ms 1834i) +33s`, or `throttling U10 (…)` once it backs off, is a run over `peakMs`: the
+   `[SHEPHERD-DEBUG]` row it counts in, what that run did (its job — `sort`, `bottle`, `craft`, `ledger`, `fetch`,
+   `scan`, `build`, `plan`, `learn`, `probe`, `scope`, `standby` or a command — the panel it drew, `beat` for the
+   heartbeat to other SHEPHERD blocks, `none` for nothing), its time, how many of the block's instructions it used, and
+   the seconds since the start.
+   `warmed up +14s` marks the end of a start's slow first runs, the seconds since the start. Leave the grid loaded
+   until it appears: logging off earlier freezes the rest of them until you are back, when they draw limiter warnings.
 3. **`[SHEPHERD-DEBUG]` — run times.** Peak and rolling-average run time against the server's limits,
    estimated sim speed, block counts and a per-tick-kind table — where you check server-legality.
    1. `U1 4% · U10 95% · U100 1%` — time spent at each speed. `U1` (every tick) while items queue up, after
@@ -160,6 +169,16 @@ Name any block with a screen. All are optional. Only the first `[SHEPHERD]`, `[S
     AngleGrinderItem  1
     WelderItem        2
    ```
+6. **`[SHEPHERD]` on a light — status light.** The status panel's verdict as a colour you can see across the base:
+   1. **Green:** `working` or `idle` with nothing below the status panel's rule but production work, or
+      `standing by`.
+   2. **Yellow:** `learning`, when nothing moves on purpose, or a line below the rule that is not
+      production work (`crafting`, `disassembling`, `refining`) — read the status panel.
+   3. **Red:** `HALTED`, or standing down after the server's PB limiter warned it was about to punish the block.
+
+   SHEPHERD sets only the colour; radius, intensity, blinking and on/off stay yours. A programmable block that has
+   stopped running (switched off, damaged, blocked) can't change it, so the light keeps its last colour: the status
+   panel's ticking clock is what shows SHEPHERD is running.
 
 ---
 
@@ -485,7 +504,8 @@ Run the programmable block with one of these arguments (case-sensitive):
 | `statsReset` | Restarts the `[SHEPHERD-DEBUG]` measurement window. |
 
 `[SHEPHERD-DEBUG]` rows: `ftch` block sweep · `scan` block classify · `bld` sort-plan build · `xfer` item
-transfer · `plan` production plan · `save` writing Custom Data · `cmd` these commands · `othr` cheap ticks.
+transfer · `plan` production plan · `save` writing Custom Data · `cmd` these commands · `othr` the rest
+(finding the next move, bottle steps, drawing panels).
 To check server-legality: let the grid settle, `statsReset`, wait a while, read `peak` and each row's
 `max`.
 

@@ -15,7 +15,7 @@ namespace IngameScript
         public static string Of(MyItemType type)
         {
             string key;
-            if (!keys.TryGetValue(type, out key)) keys[type] = key = Category.Key(type.TypeId, type.SubtypeId);
+            if (!keys.Get(type, out key)) keys[type] = key = Category.Key(type.TypeId, type.SubtypeId);
             return key;
         }
 
@@ -24,7 +24,7 @@ namespace IngameScript
         public static MyItemType ToType(string key)
         {
             var slash = key.IndexOf('/');
-            return new MyItemType("MyObjectBuilder_" + key.Substring(0, slash), key.Substring(slash + 1));
+            return new MyItemType("MyObjectBuilder_" + key.Cut(0, slash), key.Cut(slash + 1));
         }
     }
 }

@@ -15,9 +15,9 @@ namespace SHEPHERD.Tests
     {
         const string BaseData = "[Reserve:Spare]\nComponent/SteelPlate=100MA\n";
 
-        static ProgramHarness Base(out List<string> status)
+        static ProgramHarness Base(out List<string> status, string settings = "")
         {
-            var h = new ProgramHarness(ProgramHarness.Grid("Base", true, true), "Base PB", BaseData);
+            var h = new ProgramHarness(ProgramHarness.Grid("Base", true, true), "Base PB", BaseData + settings);
             status = h.AddPanel("Status [SHEPHERD]");
             h.AddCargo("Ore Cargo [SHEPHERD:Ores,Ingots]", 4, 10);
             return h;

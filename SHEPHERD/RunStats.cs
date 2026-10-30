@@ -11,7 +11,7 @@ namespace IngameScript
 
     // A running tally of per-tick wall-clock ms, bucketed by RunKind, plus one all-tick peak and a rolling mean
     // over the last WindowRuns runs — the numbers checked against the limiter's peak and average bars.
-    public sealed class RunStats
+    public class RunStats
     {
         // The limiter averages over its own last-50 non-dropped runs; match that window so SlidingAvgMs is
         // directly comparable. We can't see GC, so unlike the limiter we can't drop GC-coincident runs — this
@@ -30,8 +30,8 @@ namespace IngameScript
         int windowHead;                                    // next slot to overwrite
         double windowSum;                                  // running sum of the live window, for an O(1) mean
 
-        public double PeakMs { get; private set; }
-        public double WindowSec { get; private set; } // sim-time elapsed since the last Reset
+        public double PeakMs;
+        public double WindowSec; // sim-time elapsed since the last Reset
         public double BarMs = Pacer.DefaultPeakMs;
 
         public double SlidingAvgMs => windowCount > 0 ? windowSum / windowCount : 0.0;

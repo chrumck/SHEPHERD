@@ -6,20 +6,14 @@ namespace IngameScript
     // One refinery output of an ore: Ratio units of Output item per one unit of ore input.
     public struct OreYield
     {
-        public readonly string Output;
-        public readonly double Ratio;
-
-        public OreYield(string output, double ratio)
-        {
-            Output = output;
-            Ratio = ratio;
-        }
+        public string Output;
+        public double Ratio;
     }
 
     // The game-free production-knowledge store: item key -> assembler blueprint subtype (with the reverse map for
     // attributing live queues back to items) and ore key -> refinery output ratios. Vanilla facts are baked in;
     // only learned modded additions persist.
-    public sealed class ProductionFacts
+    public class ProductionFacts
     {
         // Most vanilla blueprints follow a naming convention (resolved live, nothing baked): blueprint subtype ==
         // item subtype, or item subtype + "Component". The baked table holds only the exceptions, generated fresh
@@ -69,10 +63,10 @@ namespace IngameScript
             foreach (var entry in BakedBlueprints.Split('|'))
             {
                 var parts = entry.Split(';');
-                var subtype = parts[0].Substring(1);
+                var subtype = parts[0].Cut(1);
                 var name = parts.Length > 2 ? parts[2]
-                    : subtype.EndsWith("Item", StringComparison.Ordinal)
-                        ? subtype.Substring(0, subtype.Length - 4) : subtype;
+                    : subtype.Ends("Item")
+                        ? subtype.Cut(0, subtype.Length - 4) : subtype;
                 Remember(TypeOf(parts[0][0]) + "/" + subtype, "Position" + parts[1] + "_" + name);
             }
 
@@ -84,24 +78,23 @@ namespace IngameScript
                     foreach (var output in parts[1].Split(','))
                     {
                         var colon = output.IndexOf(':');
-                        outputs.Add(new OreYield("Ingot/" + output.Substring(0, colon),
-                            double.Parse(output.Substring(colon + 1))));
+                        outputs.Push(new OreYield { Output = "Ingot/" + output.Cut(0, colon), Ratio = double.Parse(output.Cut(colon + 1)) });
                     }
                 yields["Ore/" + parts[0]] = outputs;
             }
         }
 
         public bool TryBlueprint(string itemKey, out string blueprint) =>
-            blueprintOf.TryGetValue(itemKey, out blueprint);
+            blueprintOf.Get(itemKey, out blueprint);
 
         // The known map, then the convention candidates — each validated through the caller's probe (live: an
         // assembler's CanUseBlueprint; tests: a mock) and session-cached on success. A failed probe is NOT cached:
         // the candidate may validate later against a different assembler.
         public bool TryResolveBlueprint(string itemKey, Func<string, bool> canUse, out string blueprint)
         {
-            if (blueprintOf.TryGetValue(itemKey, out blueprint)) return true;
+            if (blueprintOf.Get(itemKey, out blueprint)) return true;
             var slash = itemKey.IndexOf('/');
-            var subtype = slash >= 0 ? itemKey.Substring(slash + 1) : itemKey;
+            var subtype = slash >= 0 ? itemKey.Cut(slash + 1) : itemKey;
             return Probe(itemKey, subtype, canUse, out blueprint)
                 || Probe(itemKey, subtype + "Component", canUse, out blueprint);
         }
@@ -113,21 +106,21 @@ namespace IngameScript
         public string ItemOf(string blueprint)
         {
             string itemKey;
-            if (itemOf.TryGetValue(blueprint, out itemKey)) return itemKey;
-            var name = blueprint.Length > 9 && blueprint.EndsWith("Component", StringComparison.Ordinal)
-                ? blueprint.Substring(0, blueprint.Length - 9) : blueprint;
+            if (itemOf.Get(blueprint, out itemKey)) return itemKey;
+            var name = blueprint.Length > 9 && blueprint.Ends("Component")
+                ? blueprint.Cut(0, blueprint.Length - 9) : blueprint;
             return "Component/" + name;
         }
 
         public bool TryYields(string oreKey, out List<OreYield> outputs) =>
-            yields.TryGetValue(oreKey, out outputs);
+            yields.Get(oreKey, out outputs);
 
         public bool IsBlueprintKnown(string blueprint) => itemOf.ContainsKey(blueprint);
 
         public void Learn(string itemKey, string blueprint)
         {
             string current;
-            if (learnedRecipes.TryGetValue(itemKey, out current) && current == blueprint) return;
+            if (learnedRecipes.Get(itemKey, out current) && current == blueprint) return;
             ForgetReverse(itemKey);
             Remember(itemKey, blueprint);
             learnedRecipes[itemKey] = blueprint;
@@ -138,7 +131,7 @@ namespace IngameScript
         public void LearnYield(string oreKey, List<OreYield> outputs)
         {
             List<OreYield> current;
-            if (learnedYields.TryGetValue(oreKey, out current) && Same(current, outputs)) return;
+            if (learnedYields.Get(oreKey, out current) && Same(current, outputs)) return;
             yields[oreKey] = outputs;
             learnedYields[oreKey] = outputs;
             dirty = true;
@@ -163,13 +156,13 @@ namespace IngameScript
             {
                 var colon = part.LastIndexOf(':');
                 double ratio;
-                var output = colon > 0 ? part.Substring(0, colon).Trim() : null;
+                var output = colon > 0 ? part.Cut(0, colon).Trim() : null;
                 if (!ValidKey(output) || colon == part.Length - 1
-                    || !double.TryParse(part.Substring(colon + 1).Trim(), out ratio) || ratio <= 0.0)
+                    || !double.TryParse(part.Cut(colon + 1).Trim(), out ratio) || ratio <= 0.0)
                     return false;
                 foreach (var seen in parsed)
                     if (seen.Output == output) return false;
-                parsed.Add(new OreYield(output, ratio));
+                parsed.Push(new OreYield { Output = output, Ratio = ratio });
             }
             if (parsed.Count == 0) return false;
             yields[oreKey] = parsed;
@@ -179,27 +172,27 @@ namespace IngameScript
 
         public void ClearLearned()
         {
-            blueprintOf.Clear();
-            itemOf.Clear();
-            yields.Clear();
-            learnedRecipes.Clear();
-            learnedYields.Clear();
+            blueprintOf.Empty();
+            itemOf.Empty();
+            yields.Empty();
+            learnedRecipes.Empty();
+            learnedYields.Empty();
             dirty = false;
             LoadBaked();
         }
 
         public void RecipeEntries(List<KeyValuePair<string, string>> into)
         {
-            into.Clear();
+            into.Empty();
             Keys(learnedRecipes.Keys);
-            foreach (var key in keyScratch) into.Add(new KeyValuePair<string, string>(key, learnedRecipes[key]));
+            foreach (var key in keyScratch) into.Push(new KeyValuePair<string, string>(key, learnedRecipes[key]));
         }
 
         public void YieldEntries(List<KeyValuePair<string, string>> into)
         {
-            into.Clear();
+            into.Empty();
             Keys(learnedYields.Keys);
-            foreach (var key in keyScratch) into.Add(new KeyValuePair<string, string>(key, Format(learnedYields[key])));
+            foreach (var key in keyScratch) into.Push(new KeyValuePair<string, string>(key, Format(learnedYields[key])));
         }
 
         public bool TakeDirty()
@@ -218,15 +211,15 @@ namespace IngameScript
         void ForgetReverse(string itemKey)
         {
             string old, mapped;
-            if (blueprintOf.TryGetValue(itemKey, out old)
-                && itemOf.TryGetValue(old, out mapped) && mapped == itemKey) itemOf.Remove(old);
+            if (blueprintOf.Get(itemKey, out old)
+                && itemOf.Get(old, out mapped) && mapped == itemKey) itemOf.Remove(old);
         }
 
         void Keys(IEnumerable<string> keys)
         {
-            keyScratch.Clear();
-            foreach (var key in keys) keyScratch.Add(key);
-            keyScratch.Sort(StringComparer.Ordinal);
+            keyScratch.Empty();
+            foreach (var key in keys) keyScratch.Push(key);
+            keyScratch.SortOrdinal();
         }
 
         static string Format(List<OreYield> outputs)
@@ -234,8 +227,8 @@ namespace IngameScript
             var text = new System.Text.StringBuilder();
             foreach (var output in outputs)
             {
-                if (text.Length > 0) text.Append(',');
-                text.Append(output.Output).Append(':').Append(output.Ratio.ToString("R"));
+                if (text.Length > 0) text.Put(',');
+                text.Put(output.Output).Put(':').Put(output.Ratio.ToString("R"));
             }
             return text.ToString();
         }

@@ -7,14 +7,14 @@ namespace IngameScript
     // its own — the top-ranked live PB works and every other one stands by — with no negotiation and no PB having
     // to know the whole group. Times are game seconds, so sim lag slows every PB's clock alike and a paused game
     // expires nobody.
-    public sealed class PeerElection
+    public class PeerElection
     {
         public const double LeadHeartbeatSeconds = 2.0;
         // Several heartbeats, and still about three at the parked cadence, whose ~1.67 s wakes stretch the heartbeat
         // interval: a peer must miss more than one wake-rounded beat before it is given up on.
         public const double LeadStaleSeconds = 10.0;
 
-        sealed class Peer
+        class Peer
         {
             public long Rank;
             public string Label;
@@ -27,7 +27,7 @@ namespace IngameScript
         double lastSent = -LeadHeartbeatSeconds;
 
         // Whether the current leader sits on our own construct, so it already draws the panels we would.
-        public bool LeaderOnOurConstruct { get; private set; }
+        public bool LeaderOnOurConstruct;
 
         // Priority dominates; between equal priorities a station outranks a ship and a large grid a small one, which
         // picks the base over a docked ship without any configuration. A halted PB does no work, so it drops below
@@ -42,7 +42,7 @@ namespace IngameScript
         public bool Hear(long address, long rank, string label, double now, bool onOurConstruct)
         {
             Peer p;
-            var fresh = !peers.TryGetValue(address, out p) || now - p.Heard > LeadStaleSeconds;
+            var fresh = !peers.Get(address, out p) || now - p.Heard > LeadStaleSeconds;
             if (p == null) peers[address] = p = new Peer();
             p.Rank = rank;
             p.Label = label;
@@ -54,7 +54,7 @@ namespace IngameScript
         // The label of the best live peer that outranks us, or null when we lead. Forgets stale peers first.
         public string Leader(long self, long selfRank, double now)
         {
-            stale.Clear();
+            stale.Empty();
             string leader = null;
             LeaderOnOurConstruct = false;
             var bestRank = selfRank;
@@ -62,7 +62,7 @@ namespace IngameScript
             foreach (var pair in peers)
             {
                 var p = pair.Value;
-                if (now - p.Heard > LeadStaleSeconds) { stale.Add(pair.Key); continue; }
+                if (now - p.Heard > LeadStaleSeconds) { stale.Push(pair.Key); continue; }
                 if (!Outranks(p.Rank, pair.Key, bestRank, bestAddress)) continue;
                 leader = p.Label;
                 LeaderOnOurConstruct = p.OnOurConstruct;

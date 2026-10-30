@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace IngameScript
@@ -11,8 +12,8 @@ namespace IngameScript
         bool HasGas { get; }
         // Force-fill every bottle in the tank and return whether it consumed gas (filled at least one empty). The
         // sweep loops a bottle stack through the tank while this stays true, so a stack bigger than the tank's
-        // inventory volume is fully filled in one sweep.
-        bool Refill();
+        // inventory volume is fully filled in one sweep. Dry fills nothing.
+        bool Refill(bool dry);
         ICategoryAcceptor Intake { get; }
         ISortSource Contents { get; }
     }
@@ -36,7 +37,7 @@ namespace IngameScript
     // storage, refilling them on the way. If a tank's bottles cannot be placed anywhere (all storage full /
     // unreachable) the tank is recorded in StrandedTanks and Program logs it. One transfer per tick with a
     // find/commit split like SortJob; resumable across ticks with a per-step examine budget bounding the walks.
-    public sealed class BottleJob : IStepJob
+    public class BottleJob : IStepJob
     {
         // Distinct from a decremented cursor value of -1: -1 means "walked past index 0, this source is
         // exhausted — advance"; Unset means "fresh source, start at the top". They must differ because a
@@ -61,6 +62,8 @@ namespace IngameScript
         bool refillConsumed;       // did the last Refill consume gas (fill >=1 empty)? drives Decide's loop-or-advance
 
         int drainTank;             // Drain: tank being emptied
+        int drainSource;           // Drain: the next storage source to offer the tank's bottle
+        int warmTank, warmSource;  // a dry sweep's last round trips: the tank and source they have reached
         bool drainRefilled;        // Drain: the current tank was already force-refilled this visit
 
         bool commitPending;        // a transfer was prepared last tick and awaits its own bare commit tick
@@ -82,6 +85,13 @@ namespace IngameScript
 
         public bool IsDone => done;
 
+        // A dry sweep moves and fills nothing, and ends by sending each tank a round trip it never makes, bottles or
+        // not, so the sweep's code has run once before a real one needs it.
+        public bool Dry;
+        // Set by Program: the run has passed half the instruction cap. A unit's cost grows with the grid, and the cap
+        // stops the script outright, so a step yields then too.
+        public Func<bool> Full = () => false;
+
         public StepResult Step()
         {
             if (tanks == null || sources == null) { done = true; return StepResult.Done; }
@@ -94,13 +104,13 @@ namespace IngameScript
             if (commitPending)
             {
                 commitPending = false;
-                var moved = pendingSource.Commit() == CommitResult.Moved;
+                var moved = pendingSource.Commit(Dry) == CommitResult.Moved;
                 if (committingReturn && !moved)
                 {
                     RecordStranded(pendingReturnTank);
                     if (phase == Phase.Drain) NextDrainTank();
                 }
-                return StepResult.Moved;
+                return Dry ? StepResult.Scanned : StepResult.Moved;
             }
 
             while (true)
@@ -111,7 +121,7 @@ namespace IngameScript
                     // The tank had gas when Scan chose it, but an earlier lift this sweep may have spent it;
                     // re-check so a drained tank isn't force-refilled for nothing. refillConsumed drives Decide:
                     // true → loop the stack (more empties may remain); false → this stack is done (or gas ran out).
-                    if (activeTank.HasGas) { refillConsumed = activeTank.Refill(); return StepResult.Refilled; }
+                    if (activeTank.HasGas) { refillConsumed = activeTank.Refill(Dry); return StepResult.Refilled; }
                     refillConsumed = false;
                     continue;
                 }
@@ -140,7 +150,17 @@ namespace IngameScript
                 }
 
                 var d = StepDrain();
-                if (d == StepResult.Done) { done = true; return StepResult.Done; }
+                if (d == StepResult.Done)
+                {
+                    // A dry return never lands, so the tanks it left "stranded" are not.
+                    if (Dry)
+                    {
+                        if (!SendDry()) return StepResult.Scanned;
+                        StrandedTanks.Empty();
+                    }
+                    done = true;
+                    return StepResult.Done;
+                }
                 return d;
             }
         }
@@ -163,10 +183,13 @@ namespace IngameScript
 
                 while (resumeIndex >= 0)
                 {
-                    if (examined >= examineBudget) return StepResult.Scanned;
+                    if (examined >= examineBudget || Full()) return StepResult.Scanned;
                     var i = resumeIndex; examined++;
+                    // A bottle no tank takes is offered to every tank, so each offer draws the budget.
+                    if (Category.IsBottle(src.KeyAt(i)))
                     foreach (var t in tanks)
                     {
+                        examined++;
                         if (t == null || !src.CanPlaceAt(i, t.Intake)) continue;
                         src.Prepare(i, t.Intake);
                         pendingSource = src;
@@ -181,7 +204,7 @@ namespace IngameScript
                 }
 
                 srcCursor++; resumeIndex = Unset;
-                if (++examined >= examineBudget) return StepResult.Scanned; // charge the finished source too (bounded)
+                if (++examined >= examineBudget || Full()) return StepResult.Scanned; // charge the finished source too (bounded)
             }
             return StepResult.Done;
         }
@@ -194,11 +217,11 @@ namespace IngameScript
             var examined = 0;
             while (drainTank < tanks.Count)
             {
-                if (examined >= examineBudget) return StepResult.Scanned;
+                if (examined >= examineBudget || Full()) return StepResult.Scanned;
                 var t = tanks[drainTank];
                 if (t == null) { NextDrainTank(); examined++; continue; }
 
-                if (t.HasGas && !drainRefilled) { drainRefilled = true; t.Refill(); return StepResult.Refilled; }
+                if (t.HasGas && !drainRefilled) { drainRefilled = true; t.Refill(Dry); return StepResult.Refilled; }
 
                 var src = t.Contents;
                 src.Refresh();
@@ -207,10 +230,13 @@ namespace IngameScript
                 if (n <= 0) { NextDrainTank(); continue; }
 
                 var idx = n - 1;
-                foreach (var source in sources)
+                while (drainSource < sources.Count)
                 {
-                    var dest = source as ICategoryAcceptor;
+                    if (examined >= examineBudget || Full()) return StepResult.Scanned;
+                    examined++;
+                    var dest = sources[drainSource++] as ICategoryAcceptor;
                     if (dest == null || !src.CanPlaceAt(idx, dest)) continue;
+                    drainSource = 0;
                     src.Prepare(idx, dest);
                     pendingSource = src;
                     committingReturn = true;
@@ -245,12 +271,40 @@ namespace IngameScript
             return true;
         }
 
-        void NextDrainTank() { drainTank++; drainRefilled = false; }
+        // Each tank: a lift from the first storage stack, a refill and a return, none of them made — a budget of
+        // sources per step, since empty ones ahead of the first stack are walked once per tank. Returns whether
+        // every tank has had its round trip.
+        bool SendDry()
+        {
+            var examined = 0;
+            for (; warmTank < tanks.Count; warmTank++, warmSource = 0)
+            {
+                var t = tanks[warmTank];
+                for (; t != null && warmSource < sources.Count; warmSource++)
+                {
+                    if (examined++ >= examineBudget || Full()) return false;
+                    var src = sources[warmSource];
+                    if (src == null) continue;
+                    src.Refresh();
+                    if (src.Count == 0) continue;
+                    src.CanPlaceAt(0, t.Intake);
+                    src.Prepare(0, t.Intake);
+                    src.Commit(true);
+                    t.Refill(true);
+                    if (PrepareReturn(t, src)) pendingSource.Commit(true);
+                    commitPending = false;
+                    break;
+                }
+            }
+            return true;
+        }
+
+        void NextDrainTank() { drainTank++; drainRefilled = false; drainSource = 0; }
 
         void RecordStranded(string tankName)
         {
             foreach (var t in StrandedTanks) if (t == tankName) return;
-            StrandedTanks.Add(tankName);
+            StrandedTanks.Push(tankName);
         }
     }
 }

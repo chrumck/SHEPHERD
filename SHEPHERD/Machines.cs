@@ -29,27 +29,14 @@ namespace IngameScript
     // cycle, so value semantics keep that rebuild from heap-allocating one object per managed block.
     public struct ManagedBlock
     {
-        public readonly IMyTerminalBlock Block;
-        public readonly Role Role;
-        public readonly IMyInventory Input;
-        public readonly IMyInventory Output;
-        public readonly string ReservePool;
-        public readonly int Construct;
-        public readonly bool CatchAll;
-        public readonly AssemblerMark Mark;
-
-        public ManagedBlock(IMyTerminalBlock block, Role role, IMyInventory input, IMyInventory output, string reservePool, int construct, bool catchAll,
-            AssemblerMark mark)
-        {
-            Block = block;
-            Role = role;
-            Input = input;
-            Output = output;
-            ReservePool = reservePool;
-            Construct = construct;
-            CatchAll = catchAll;
-            Mark = mark;
-        }
+        public IMyTerminalBlock Block;
+        public Role Role;
+        public IMyInventory Input;
+        public IMyInventory Output;
+        public string ReservePool;
+        public int Construct;
+        public bool CatchAll;
+        public AssemblerMark Mark;
 
         public bool IsReserve => ReservePool != null;
         public bool Docked => Construct > 0;
@@ -189,7 +176,7 @@ namespace IngameScript
     // call); all instances share one reused MyProductionItem buffer — safe because the ledger walk touches one
     // assembler at a time. Append and the mode set are the network-replicated terminal actions the craft stepper
     // budgets to one per tick.
-    public sealed class AssemblerState : IAssemblerState
+    public class AssemblerState : IAssemblerState
     {
         const string BlueprintPrefix = "MyObjectBuilder_BlueprintDefinition/";
 
@@ -220,7 +207,10 @@ namespace IngameScript
         // reading it back: every set is network-replicated, and one the game ignores would be retried on every build.
         public bool CanCooperate => !Model.Contains("SurvivalKit");
         public bool Cooperative => assembler.CooperativeMode;
-        public void SetCooperative(bool on) => assembler.CooperativeMode = on;
+        public void SetCooperative(bool on, bool dry)
+        {
+            if (!dry) assembler.CooperativeMode = on;
+        }
 
         // The game divides a blueprint's build time by the world speed multiplier times (the model's base speed +
         // its Productivity upgrades), so relative to other assemblers the multiplier cancels out. A PB can't read a
@@ -229,10 +219,10 @@ namespace IngameScript
         {
             get
             {
-                upgrades.Clear();
+                upgrades.Empty();
                 (assembler as IMyUpgradableBlock)?.FillUpgradesDictionary(upgrades);
                 float productivity;
-                upgrades.TryGetValue("Productivity", out productivity);
+                upgrades.Get("Productivity", out productivity);
                 var m = Model;
                 return Math.Max(0.1, productivity + (m == "SX_Wade2" ? 5 : m == "BasicAssembler" ? 0.7
                     : m.Contains("SurvivalKit") ? 0.3 : 1));
@@ -245,23 +235,23 @@ namespace IngameScript
 
         public void QueueInto(List<QueueEntry> into)
         {
-            into.Clear();
-            buffer.Clear();
+            into.Empty();
+            buffer.Empty();
             assembler.GetQueue(buffer);
             foreach (var item in buffer)
-                into.Add(new QueueEntry(item.BlueprintId.SubtypeName, (double)item.Amount));
+                into.Push(new QueueEntry { Blueprint = item.BlueprintId.SubtypeName, Amount = (double)item.Amount });
         }
 
         public void OutputInto(Dictionary<string, double> into)
         {
-            into.Clear();
-            itemBuffer.Clear();
+            into.Empty();
+            itemBuffer.Empty();
             assembler.GetInventory(1).GetItems(itemBuffer);
             foreach (var item in itemBuffer)
             {
                 var key = ItemKey.Of(item.Type);
                 double amount;
-                into[key] = (into.TryGetValue(key, out amount) ? amount : 0.0) + (double)item.Amount;
+                into[key] = (into.Get(key, out amount) ? amount : 0.0) + (double)item.Amount;
             }
         }
 
@@ -275,33 +265,38 @@ namespace IngameScript
 
         // No try/catch: the planner only appends CanUse-verified blueprints, so a throw here is a genuine fault
         // the scheduler's crash breaker should surface, not swallow.
-        public void Append(string blueprint, double amount) =>
-            assembler.AddQueueItem(MyDefinitionId.Parse(BlueprintPrefix + blueprint), amount);
+        public void Append(string blueprint, double amount, bool dry)
+        {
+            if (!dry) assembler.AddQueueItem(MyDefinitionId.Parse(BlueprintPrefix + blueprint), amount);
+        }
 
-        public void ClearQueue() => assembler.ClearQueue();
+        public void ClearQueue(bool dry)
+        {
+            if (!dry) assembler.ClearQueue();
+        }
 
         // One removal per call, from the newest entry of the blueprint and never the unit in production, whose
         // progress would be lost — the planner sized the amount by the same rule, but the queue may have moved since.
-        public double Trim(string blueprint, double amount)
+        public double Trim(string blueprint, double amount, bool dry)
         {
-            buffer.Clear();
+            buffer.Empty();
             assembler.GetQueue(buffer);
             for (var i = buffer.Count - 1; i >= 0; i--)
             {
                 if (buffer[i].BlueprintId.SubtypeName != blueprint) continue;
                 amount = Math.Min(amount, (double)buffer[i].Amount - (i == 0 ? 1 : 0));
                 if (amount < 1) return 0;
-                assembler.RemoveQueueItem(i, amount);
+                if (!dry) assembler.RemoveQueueItem(i, amount);
                 return amount;
             }
             return 0;
         }
 
         // Write-on-change: a mode set is network-replicated, so an already-matching mode writes nothing.
-        public void SetDisassembling(bool on)
+        public void SetDisassembling(bool on, bool dry)
         {
             var mode = on ? MyAssemblerMode.Disassembly : MyAssemblerMode.Assembly;
-            if (assembler.Mode != mode) assembler.Mode = mode;
+            if (!dry && assembler.Mode != mode) assembler.Mode = mode;
         }
     }
 }

@@ -29,8 +29,9 @@ namespace SHEPHERD.Tests
             public bool CanCooperate { get; private set; }
             public bool Cooperative { get; private set; }
 
-            public void SetCooperative(bool on)
+            public void SetCooperative(bool on, bool dry)
             {
+                if (dry) return;
                 Writes.Add(on);
                 Cooperative = on;
             }

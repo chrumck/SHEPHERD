@@ -9,7 +9,7 @@ namespace IngameScript
     // chain of connected connectors, minus whatever lies behind a [SHEPHERD-Split] connector, minus blocks another
     // player owns. Rebuilt from the live connectors each scan, so a dock, an undock or a retag shows on the next one.
     // Constructs, not grids: rotor and piston subgrids belong to the construct they hang off.
-    public sealed partial class ManagedScope
+    public partial class ManagedScope
     {
         readonly List<IMyCubeGrid> constructs = new List<IMyCubeGrid>(); // one grid per construct, home first
         readonly List<IMyCubeGrid> edgeA = new List<IMyCubeGrid>();
@@ -17,28 +17,28 @@ namespace IngameScript
         long owner;
         bool factionShare;
 
-        public bool DockedProduction { get; private set; }
-        public bool DockedFuel { get; private set; }
+        public bool DockedProduction;
+        public bool DockedFuel;
         public int Count => constructs.Count;
 
         public void Build(List<IMyShipConnector> connectors, IMyCubeGrid home, long ownerId, bool shareWithFaction,
             bool dockedProduction, bool dockedFuel)
         {
-            constructs.Clear();
-            edgeA.Clear();
-            edgeB.Clear();
+            constructs.Empty();
+            edgeA.Empty();
+            edgeB.Empty();
             owner = ownerId;
             factionShare = shareWithFaction;
             DockedProduction = dockedProduction;
             DockedFuel = dockedFuel;
-            constructs.Add(home);
+            constructs.Push(home);
             foreach (var c in connectors)
             {
                 var other = c.OtherConnector;
                 if (c.Status != MyShipConnectorStatus.Connected || other == null
                     || Tags.Parse(c.CustomName).IsSplit || Tags.Parse(other.CustomName).IsSplit) continue;
-                edgeA.Add(c.CubeGrid);
-                edgeB.Add(other.CubeGrid);
+                edgeA.Push(c.CubeGrid);
+                edgeB.Push(other.CubeGrid);
             }
             // Each pass admits the far end of every edge with exactly one end in scope; a pass admitting nothing ends
             // the walk, so there are at most as many passes as edges.
@@ -50,7 +50,7 @@ namespace IngameScript
                 {
                     var inA = IndexOf(edgeA[i]) >= 0;
                     if (inA == IndexOf(edgeB[i]) >= 0) continue;
-                    constructs.Add(inA ? edgeB[i] : edgeA[i]);
+                    constructs.Push(inA ? edgeB[i] : edgeA[i]);
                     grew = true;
                 }
             }

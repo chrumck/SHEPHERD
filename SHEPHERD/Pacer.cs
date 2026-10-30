@@ -8,7 +8,7 @@ namespace IngameScript
     // ship docking mid-idle-cycle) take minutes, since a whole cycle must step through before the first move is
     // even found. Recovering = a breach was just seen, a spike hold or a stand-down runs, or the sim is wary:
     // wake less often and fire no heavy call until it passes. Parked = a safety hold (sim park, open breaker,
-    // escalated back-off) — wake rarely; minimal presence is the point.
+    // escalated back-off, the hold after a run gap) — wake rarely; minimal presence is the point.
     public enum Cadence { Parked, Idle, Working, Recovering }
 
     // The one adaptive controller. A PB cannot read its own in-run time, so every decision is driven by the
@@ -43,8 +43,13 @@ namespace IngameScript
     //     ends, yet a server may punish a few long runs close together from the very first run. So spikes run as
     //     fast as that rule allows: two may land back to back, and a second one inside the window parks at ANY sim
     //     until the first has aged out of it;
+    //   * a hold after a run gap — a server that left this PB unrun for seconds is under load it has not shed yet
+    //     (after a restart or a login it holds a base's PBs until the owner's client has loaded, then stretches
+    //     cheap runs over the peak bar for a minute or more), and every run is a chance for that load to land on one. So the
+    //     hold makes few runs and fires no heavy call, except that a slow run in the limiter's 50-run average
+    //     wakes it faster: at the slow cadence that average spans over a minute;
     //   * dynamic cadence — fast only while a backlog drains, moderate otherwise, rare only under a safety park.
-    public sealed class Pacer
+    public class Pacer
     {
         // The server-matched bars: Destiny's limiter, unless [Settings] overrides them for another server.
         public const double DefaultPeakMs = 1.5;    // the limiter's per-run peak bar — a run charged over this is an offense candidate
@@ -115,7 +120,7 @@ namespace IngameScript
         double simInstant = 1.0; // the newest USABLE sample — dropped intervals leave it alone, so the readout
                                  // shows the last real measurement instead of flashing a pause artifact
 
-        public bool AllowHeavy { get; private set; }
+        public bool AllowHeavy;
 
         public void SetBars(double peakMs, double parkBelowSim, double resumeAboveSim, double backoffBelowSim)
         {
@@ -133,6 +138,9 @@ namespace IngameScript
 
         public bool SimParked => simParked;
 
+        // The limiter's last warning came in: the next offense punishes the PB.
+        public bool StandingDown => standDownSec > 0.0;
+
         public bool SimWary => simDipCount >= WaryDips && !simParked;
 
         public double SimInstant => simInstant;
@@ -143,24 +151,24 @@ namespace IngameScript
         public bool Quiet => spikeSec > 0.0;
 
         // Runs over the spike bar; each one is worth a log line.
-        public int Spikes { get; private set; }
+        public int Spikes;
 
         // How many times a cadence back-off has ENGAGED since the last reset (each fresh engagement, not each
         // throttled tick). Surfaced as "thr xN" on [SHEPHERD-DEBUG]. It over-states real offenses (it can't see
         // the limiter's GC-drop and isn't debounced), so read it as an upper bound, not the offense count.
-        public int Backoffs { get; private set; }
+        public int Backoffs;
 
         // How many times a back-off window escalated to a park (a second breach inside it). Rare by construction:
         // the first breach already holds every heavy call, so only an external stall can land the second.
-        public int Escalations { get; private set; }
+        public int Escalations;
 
         // How many times the sim park's wary stage engaged, and the sim-time spent wary or in a breach back-off since
         // the last reset. Both hold the cadence at the same rate, so only these tell the two apart; wary edges are
         // too frequent to log. An interval counts whole toward the state the previous tick left: the wake rate
         // holds for all of it, even if the timer ran out partway. The two may overlap.
-        public int Waries { get; private set; }
-        public double WaryTime { get; private set; }
-        public double BackoffTime { get; private set; }
+        public int Waries;
+        public double WaryTime;
+        public double BackoffTime;
 
         // The crash breaker is open — too many steps threw with no clean run between. Park so a persistently-
         // crashing step is retried at most once per rare wake, never hammered. Closes on a clean run.

@@ -14,7 +14,7 @@ namespace SHEPHERD.Tests
         void Commit(params string[] current)
         {
             channel.Begin();
-            foreach (var message in current) channel.Add(message);
+            foreach (var message in current) channel.Push(message);
             channel.Commit();
         }
 
@@ -84,13 +84,13 @@ namespace SHEPHERD.Tests
             var otherEmitted = new List<string>();
             var other = new StateChannel(otherEmitted.Add);
             other.Begin();
-            other.Add("a");
+            other.Push("a");
             other.Commit();
 
             Commit("a");           // this channel sees "a" for the first time
             Commit();              // and drops it
             other.Begin();
-            other.Add("a");
+            other.Push("a");
             other.Commit();        // the other channel still holds it, so no second emit
 
             Assert.Equal(new[] { "a" }, emitted);

@@ -10,7 +10,7 @@ namespace IngameScript
     // States go through a StateChannel, so a state's one string is both the panel line and the log entry and the two
     // surfaces cannot word the same condition differently. Wording is operation-first ("craft X: no blueprint") so a
     // glance reads as verb, subject, obstruction.
-    public sealed class ProductionStatus
+    public class ProductionStatus
     {
         readonly List<string> actions = new List<string>();
         readonly StateChannel states;
@@ -24,33 +24,33 @@ namespace IngameScript
         public void Compose(CraftPlanner craft, RefinePlanner refine, DiscoveryCoordinator discovery,
                             BlueprintProbe probe, YieldSample sample, MarkCheck marks)
         {
-            actions.Clear();
+            actions.Empty();
             states.Begin();
             foreach (var a in craft.Actions)
             {
-                if (a.Kind == CraftActionKind.AppendAssembly) actions.Add("crafting " + a.Item + " +" + a.Amount);
-                else if (a.Kind == CraftActionKind.AppendDisassembly) actions.Add("disassembling " + a.Item + " " + a.Amount);
+                if (a.Kind == CraftActionKind.AppendAssembly) actions.Push("crafting " + a.Item + " +" + a.Amount);
+                else if (a.Kind == CraftActionKind.AppendDisassembly) actions.Push("disassembling " + a.Item + " " + a.Amount);
             }
-            foreach (var r in refine.Requests) actions.Add("refining " + r.Ore + " for " + r.Ingot);
+            foreach (var r in refine.Requests) actions.Push("refining " + r.Ore + " for " + r.Ingot);
             // A knowledge request for the item means learning is already under way and says so in its own line;
             // the generic obstruction would only restate it less usefully.
             foreach (var key in craft.NeedBlueprint)
-                if (!discovery.HasBlueprint(key)) states.Add("craft " + key + ": no blueprint");
-            states.Add(probe.Status);
-            foreach (var line in marks.Problems) states.Add(line);
+                if (!discovery.HasBlueprint(key)) states.Push("craft " + key + ": no blueprint");
+            states.Push(probe.Status);
+            foreach (var line in marks.Problems) states.Push(line);
             // A mark problem already says why nothing takes orders, so "no Main" would only restate it.
             for (var why = 0; why < craft.Unassigned.Length; why++)
                 if (marks.Problems.Count == 0 || why % CraftPlanner.Disassembly != CraftPlanner.NoMain)
                     foreach (var key in craft.Unassigned[why])
-                        states.Add(why < CraftPlanner.Disassembly ? "craft " + key + Unassigned[why]
+                        states.Push(why < CraftPlanner.Disassembly ? "craft " + key + Unassigned[why]
                             : "disassemble " + key + (why == CraftPlanner.Disassembly + CraftPlanner.NoAssembler ? ": no free assembler" : Unassigned[why - CraftPlanner.Disassembly]));
-            foreach (var key in craft.HeldAssembly) states.Add("craft " + key + ": disassembly queued");
-            foreach (var key in craft.HeldDisassembly) states.Add("disassemble " + key + ": assembly queued");
-            states.Add(craft.StalledQueueStatus);
+            foreach (var key in craft.HeldAssembly) states.Push("craft " + key + ": disassembly queued");
+            foreach (var key in craft.HeldDisassembly) states.Push("disassemble " + key + ": assembly queued");
+            states.Push(craft.StalledQueueStatus);
             foreach (var key in refine.NeedYield)
-                if (!sample.Active || sample.Ore != key) states.Add("refine " + key + ": yield unknown");
-            states.Add(sample.Status);
-            foreach (var line in refine.Blocked) states.Add(line);
+                if (!sample.Active || sample.Ore != key) states.Push("refine " + key + ": yield unknown");
+            states.Push(sample.Status);
+            foreach (var line in refine.Blocked) states.Push(line);
             states.Commit();
         }
     }
@@ -60,7 +60,7 @@ namespace IngameScript
     // same instances each tick). Cur/Max/Explicit are the live layer's per-render tally. Overflow marks a category
     // whose only home is the catch-all: its fill is the catch-all row's, so repeating it per category would make
     // every unhomed row read the same number and hide which categories actually have a container.
-    public sealed class CategoryFill
+    public class CategoryFill
     {
         public readonly string Name;
         public bool HasRoute, Explicit, Overflow;
@@ -90,45 +90,45 @@ namespace IngameScript
                                   List<CategoryFill> fills, List<CategoryFill> reserves, List<List<string>> messages,
                                   int assemblers = -1, bool disassembling = false)
         {
-            sb.Clear();
-            sb.Append("SHEPHERD ").Append(version).Append(" · ").AppendLine(health);
-            sb.AppendLine(blockName);
-            sb.AppendLine(stamp);
+            sb.Empty();
+            sb.Put("SHEPHERD ").Put(version).Put(" · ").Line(health);
+            sb.Line(blockName);
+            sb.Line(stamp);
             if (assemblers >= 0)
-                sb.Append(assemblers).Append(assemblers == 1 ? " Assembler Controlled" : " Assemblers Controlled")
-                    .AppendLine(disassembling ? ", one disassembling" : "");
+                sb.Put(assemblers).Put(assemblers == 1 ? " Assembler Controlled" : " Assemblers Controlled")
+                    .Line(disassembling ? ", one disassembling" : "");
             if (fills != null)
                 foreach (var f in fills)
                 {
-                    sb.Append(Pad(f.Name));
-                    if (!f.HasRoute) { sb.AppendLine("──no route──"); continue; }
-                    if (f.Overflow) { sb.AppendLine("──catch-all──"); continue; }
+                    sb.Put(Pad(f.Name));
+                    if (!f.HasRoute) { sb.Line("──no route──"); continue; }
+                    if (f.Overflow) { sb.Line("──catch-all──"); continue; }
                     AppendBar(sb, f.Fraction, false);
-                    sb.AppendLine();
+                    sb.Line();
                 }
             if (reserves != null && reserves.Count > 0)
             {
-                for (var i = 0; i < NamePad + BarWidth; i++) sb.Append('─');
-                sb.AppendLine();
+                for (var i = 0; i < NamePad + BarWidth; i++) sb.Put('─');
+                sb.Line();
                 foreach (var r in reserves)
                 {
-                    sb.Append(Pad(r.Name));
+                    sb.Put(Pad(r.Name));
                     // Reserve fill is quota-based (have/want) and may exceed 100% when over-stocked, unlike the
                     // volume-bounded category fills — so its percent isn't clamped. A pool with only All-mode
                     // quotas has no target to measure against, so it shows a marker instead of a bar.
-                    if (!r.HasRoute) { sb.AppendLine("──all──"); continue; }
+                    if (!r.HasRoute) { sb.Line("──all──"); continue; }
                     AppendBar(sb, r.Fraction, true);
-                    sb.AppendLine();
+                    sb.Line();
                 }
             }
             // The message section: current production work plus every standing state. Its rule is drawn even when
             // there is nothing to say, so the panel's layout doesn't shift under the reader as states come and go —
             // and an empty section is itself the signal that nothing needs attention.
-            for (var i = 0; i < NamePad + BarWidth; i++) sb.Append('─');
-            sb.AppendLine();
+            for (var i = 0; i < NamePad + BarWidth; i++) sb.Put('─');
+            sb.Line();
             if (messages != null)
                 foreach (var block in messages)
-                    foreach (var line in block) sb.AppendLine(line);
+                    foreach (var line in block) sb.Line(line);
         }
 
         // The bar always clamps to [0, BarWidth]; allowOver lets the trailing percent run past 100 (reserve quota
@@ -137,10 +137,10 @@ namespace IngameScript
         {
             var frac = fraction < 0.0 ? 0.0 : fraction > 1.0 ? 1.0 : fraction;
             var filled = (int)(frac * BarWidth + 0.5);
-            for (var i = 0; i < BarWidth; i++) sb.Append(i < filled ? Filled : Empty);
+            for (var i = 0; i < BarWidth; i++) sb.Put(i < filled ? Filled : Empty);
             var pctFrac = allowOver ? (fraction < 0.0 ? 0.0 : fraction) : frac;
             var pct = (int)(pctFrac * 100.0 + 0.5);
-            sb.Append(' ').Append(pct).Append('%');
+            sb.Put(' ').Put(pct).Put('%');
         }
 
         static string Pad(string name)
@@ -160,18 +160,20 @@ namespace IngameScript
         static readonly List<string> keys = new List<string>();
         static readonly List<double> amounts = new List<double>();
         static readonly List<string> levels = new List<string>();
+        static readonly Dictionary<string, int> groupOf = new Dictionary<string, int>();
+        static readonly List<int> group = new List<int>(), starts = new List<int>(), order = new List<int>();
 
         public static void Render(StringBuilder sb, ReservePool pool)
         {
             var configured = pool.QuotaCount > 0;
-            keys.Clear();
+            keys.Empty();
             if (configured) keys.AddRange(pool.Quotas.Keys);
             else keys.AddRange(pool.Counts.Keys);
-            amounts.Clear();
-            foreach (var key in keys) amounts.Add(pool.Count(key));
+            amounts.Empty();
+            foreach (var key in keys) amounts.Push(pool.Count(key));
 
             double fill;
-            sb.Append(pool.Name.Length == 0 ? "(default)" : pool.Name).Append(" · ").AppendLine(
+            sb.Put(pool.Name.Length == 0 ? "(default)" : pool.Name).Put(" · ").Line(
                 pool.Containers == 0 ? "no container"
                 : !configured ? "no quotas"
                 : pool.TryQuotaFill(out fill) ? (int)(fill * 100.0 + 0.5) + "%" : "all");
@@ -182,16 +184,16 @@ namespace IngameScript
         // catch-all section: whatever the catch-all containers hold, of any category.
         public static void Render(StringBuilder sb, string category, List<string> stockKeys, List<string> categories, ProductionLedger ledger)
         {
-            if (sb.Length > 0) sb.AppendLine();
-            keys.Clear();
-            amounts.Clear();
+            if (sb.Length > 0) sb.Line();
+            keys.Empty();
+            amounts.Empty();
             for (var i = 0; i < stockKeys.Count; i++)
             {
                 if (category != null && categories[i] != category) continue;
                 var amount = category == null ? ledger.Caught(stockKeys[i]) : ledger.Stock(stockKeys[i]);
-                if (amount > 0) { keys.Add(stockKeys[i]); amounts.Add(amount); }
+                if (amount > 0) { keys.Push(stockKeys[i]); amounts.Push(amount); }
             }
-            sb.Append(category ?? "catch-all").Append(" · ").AppendLine(keys.Count == 0 ? "empty" : keys.Count + " items");
+            sb.Put(category ?? "catch-all").Put(" · ").Line(keys.Count == 0 ? "empty" : keys.Count + " items");
             Lines(sb, null);
         }
 
@@ -199,50 +201,55 @@ namespace IngameScript
         {
             var width = 0;
             var levelWidth = 0;
-            levels.Clear();
+            levels.Empty();
             for (var i = 0; i < keys.Count; i++)
             {
                 if (Name(keys[i]).Length > width) width = Name(keys[i]).Length;
                 Quota q;
                 var level = Amount(amounts[i]);
                 if (quotas != null && quotas.TryGetQuota(keys[i], out q)) level += "/" + q.Format();
-                levels.Add(level);
+                levels.Push(level);
                 if (level.Length > levelWidth) levelWidth = level.Length;
             }
 
-            // Quadratic in the pool's line count, which a user sizes by hand — tens of lines, on a cheap tick.
-            for (var i = 0; i < keys.Count; i++)
+            // Each type's lines together, the types in first-seen order: a counting pass, since a stock panel can
+            // list hundreds of items in a single run.
+            groupOf.Empty();
+            group.Empty();
+            starts.Empty();
+            order.Empty();
+            foreach (var key in keys)
             {
-                if (SeenType(i)) continue;
-                var slash = keys[i].IndexOf('/');
-                sb.AppendLine(slash < 0 ? "" : keys[i].Substring(0, slash));
-                for (var j = i; j < keys.Count; j++)
-                {
-                    if (!SameType(keys[i], keys[j])) continue;
-                    var key = keys[j];
-                    sb.Append(' ').Append(Name(key).PadRight(width)).Append("  ").Append(levels[j]);
-                    Quota q;
-                    // All has no amount to measure against, and a 0 target none to divide by.
-                    if (quotas != null && quotas.TryGetQuota(key, out q) && q.Mode != QuotaMode.All && q.Target > 0)
-                        sb.Append(' ', levelWidth - levels[j].Length).Append(((int)(amounts[j] / q.Target * 100.0 + 0.5) + "%").PadLeft(6));
-                    sb.AppendLine();
-                }
+                var type = TypeOf(key);
+                int g;
+                if (!groupOf.Get(type, out g)) { groupOf[type] = g = starts.Count; starts.Push(0); }
+                starts[g]++;
+                group.Push(g);
+                order.Push(0);
+            }
+            for (int g = 0, at = 0; g < starts.Count; g++) { var c = starts[g]; starts[g] = at; at += c; }
+            for (var i = 0; i < keys.Count; i++) order[starts[group[i]]++] = i;
+            for (var n = 0; n < order.Count; n++)
+            {
+                var j = order[n];
+                var key = keys[j];
+                if (n == 0 || group[j] != group[order[n - 1]]) sb.Line(TypeOf(key));
+                sb.Put(' ').Put(Name(key).PadRight(width)).Put("  ").Put(levels[j]);
+                Quota q;
+                // All has no amount to measure against, and a 0 target none to divide by.
+                if (quotas != null && quotas.TryGetQuota(key, out q) && q.Mode != QuotaMode.All && q.Target > 0)
+                    sb.Append(' ', levelWidth - levels[j].Length).Put(((int)(amounts[j] / q.Target * 100.0 + 0.5) + "%").PadLeft(6));
+                sb.Line();
             }
         }
 
         // The one place an item's display name is derived, so a future alias lookup replaces only this.
-        static string Name(string key) => key.Substring(key.IndexOf('/') + 1);
+        static string Name(string key) => key.Cut(key.IndexOf('/') + 1);
 
-        static bool SeenType(int i)
+        static string TypeOf(string key)
         {
-            for (var j = 0; j < i; j++) if (SameType(keys[j], keys[i])) return true;
-            return false;
-        }
-
-        static bool SameType(string a, string b)
-        {
-            var slash = a.IndexOf('/');
-            return slash == b.IndexOf('/') && (slash < 0 || string.CompareOrdinal(a, 0, b, 0, slash) == 0);
+            var slash = key.IndexOf('/');
+            return slash < 0 ? "" : key.Cut(0, slash);
         }
 
         // Exact below ten thousand so a typed target reads back as written; ingots carry fractions. No millions
