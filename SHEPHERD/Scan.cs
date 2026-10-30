@@ -345,9 +345,9 @@ namespace IngameScript
             var inv = block.GetInventory(0);
             if (inv == null) return;
 
-            // A gun pulls its own ammo and a parachute hatch its canvas through the conveyor, so draining either only
-            // ping-pongs the item back and forth at a transfer each way.
-            if (block is IMyUserControllableGun || block is IMyParachute) return;
+            // A gun pulls its own ammo, a parachute hatch its canvas and a welder its components through the conveyor,
+            // so draining any of them only ping-pongs the item back and forth at a transfer each way.
+            if (block is IMyUserControllableGun || block is IMyParachute || block is IMyShipWelder) return;
 
             // A gas tank is a bottle refill station, not drain-storage: its inventory holds bottles being
             // maintained, so it is captured here and NOT added to Managed (never drained by the sort).

@@ -124,8 +124,8 @@ A tag ends at the first `]`.
    a pool name must not contain `[` or `]`.
 2. **Reach:** SHEPHERD manages its own construct and every construct joined to it over connected connectors, except
    past a connector tagged `[SHEPHERD-Split]` (either end of the pair).
-3. **Never managed:** weapons and parachute hatches (they pull their own ammo and canvas), and blocks tagged
-   `[SHEPHERD-Off]`. Gas tanks are used only to refill bottles.
+3. **Never managed:** weapons, parachute hatches and welders (they pull their own ammo, canvas and components), and
+   blocks tagged `[SHEPHERD-Off]`. Gas tanks are used only to refill bottles.
 4. **Docked grids:** their cargo is unloaded home and their `[SHEPHERD-RESERVE…]` pools are filled; their
    `[SHEPHERD:…]` tags are ignored. Their machines follow `dockedFuel` and `dockedProduction` (A2).
 5. **Assemblers:** SHEPHERD queues only on `[SHEPHERD-Main]` (one per construct) and `[SHEPHERD-Coop]` assemblers,

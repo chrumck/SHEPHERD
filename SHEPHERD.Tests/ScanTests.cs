@@ -233,7 +233,6 @@ namespace SHEPHERD.Tests
         [Fact] public void AssemblerIsProcessor() => Assert.Equal(Role.Processor, Managed1<IMyAssembler>().Role);
         [Fact] public void DrillIsCollector() => Assert.Equal(Role.Collector, Managed1<IMyShipDrill>().Role);
         [Fact] public void GrinderIsCollector() => Assert.Equal(Role.Collector, Managed1<IMyShipGrinder>().Role);
-        [Fact] public void WelderIsCollector() => Assert.Equal(Role.Collector, Managed1<IMyShipWelder>().Role);
         [Fact] public void CollectorIsCollector() => Assert.Equal(Role.Collector, Managed1<IMyCollector>().Role);
 
         [Fact]
@@ -440,6 +439,16 @@ namespace SHEPHERD.Tests
         public void ParachuteHatchesAreNeverManagedEvenWhenTagged()
         {
             var scan = Classify(Typed<IMyParachute>("Chute [SHEPHERD:Components]"), Block("Cargo", true));
+            Assert.Single(scan.Managed);
+            Assert.Equal("Cargo", scan.Managed[0].Block.CustomName);
+            Assert.Empty(scan.Destinations);
+        }
+
+        // A welder pulls the components it welds with, so draining it would only ping-pong them through the conveyor.
+        [Fact]
+        public void WeldersAreNeverManagedEvenWhenTagged()
+        {
+            var scan = Classify(Typed<IMyShipWelder>("Welder [SHEPHERD:Components]"), Block("Cargo", true));
             Assert.Single(scan.Managed);
             Assert.Equal("Cargo", scan.Managed[0].Block.CustomName);
             Assert.Empty(scan.Destinations);

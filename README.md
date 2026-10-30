@@ -458,7 +458,7 @@ perfect, so sanity-check a new `[Yields]` line.
 SHEPHERD manages its own grid (rotors, pistons, hinges included) and **your** ships docked by connector,
 chains included.
 
-1. **Unloaded:** cargo, cockpits, connectors, drills, grinders, welders and collectors are emptied into the
+1. **Unloaded:** cargo, cockpits, connectors, drills, grinders and collectors are emptied into the
    base — everything except reserve stock and `[SHEPHERD-Off]` blocks. A docked container's `[SHEPHERD:…]`
    tag is ignored while docked.
 2. **Resupplied:** docked reserve containers are filled to their pool's quotas from the **base's** Custom
@@ -558,8 +558,9 @@ SHEPHERD on the same grid** — load SHEPHERD into the old programmable block or
    Data is read only at startup and on `configReload`; SHEPHERD writes only its managed `[Categories]`,
    `[Production]`, `[Recipes]` and `[Yields]` sections, missing `[Settings]` keys and learned `[Reserve…]` lines,
    keeping your other lines and comments.
-2. **Weapons and parachute hatches are left alone** — they pull their own ammo and canvas. A modded weapon
-   built on a conveyor-sorter block isn't recognised as one; tag it `[SHEPHERD-Off]`.
+2. **Weapons, parachute hatches and welders are left alone** — they pull their own ammo, canvas and
+   components. Nanobot Build and Repair blocks are welders to the game, so they are left alone too. A
+   modded weapon built on a conveyor-sorter block isn't recognised as one; tag it `[SHEPHERD-Off]`.
 3. **Switched-off or broken machines get nothing**, and an off assembler's queue doesn't count, so its
    shortfall goes to another assembler taking orders — or, if it's the `Main`, waits
    (`craft X: Main assembler off`). A machine without power counts as on.

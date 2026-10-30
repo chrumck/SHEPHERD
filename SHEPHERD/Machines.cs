@@ -14,7 +14,7 @@ namespace IngameScript
     public enum Role
     {
         Storage,    // cargo/cockpit/connector/sorter/generic: drained into destinations
-        Collector,  // drill/grinder/welder/collector: pure source, drained to storage (its contents are yield/loot)
+        Collector,  // drill/grinder/collector: pure source, drained to storage (its contents are yield/loot)
         Consumer,   // reactor / O2-H2 gen / irrigation system: filled with fuel, not drained (foreign items evicted)
         Processor   // refinery / assembler: input fed & not scattered, output harvested to storage
     }
@@ -92,7 +92,7 @@ namespace IngameScript
         {
             if (block is IMyRefinery || block is IMyAssembler) return Role.Processor;
             if (block is IMyReactor || block is IMyGasGenerator) return Role.Consumer;
-            if (block is IMyShipDrill || block is IMyShipGrinder || block is IMyShipWelder || block is IMyCollector) return Role.Collector;
+            if (block is IMyShipDrill || block is IMyShipGrinder || block is IMyCollector) return Role.Collector;
             return Role.Storage;
         }
 
