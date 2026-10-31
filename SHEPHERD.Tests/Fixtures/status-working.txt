@@ -12,4 +12,5 @@ Others         ──no route──
 ─────────────────────────
 Spare          ░░░░░░░░░░ 0%
 ─────────────────────────
-craft Component/SteelPlate: no Main assembler
+craft Component/SteelPlate: no Main
+  assembler

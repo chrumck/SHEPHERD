@@ -88,7 +88,7 @@ namespace IngameScript
         // assemblers sits above the rule because it describes the setup, not something to act on; negative omits it.
         public static void Render(StringBuilder sb, string version, string blockName, string health, string stamp,
                                   List<CategoryFill> fills, List<CategoryFill> reserves, List<List<string>> messages,
-                                  int assemblers = -1, bool disassembling = false)
+                                  int assemblers = -1, bool disassembling = false, int wrap = 0)
         {
             sb.Empty();
             sb.Put("SHEPHERD ").Put(version).Put(" · ").Line(health);
@@ -128,7 +128,24 @@ namespace IngameScript
             sb.Line();
             if (messages != null)
                 foreach (var block in messages)
-                    foreach (var line in block) sb.Line(line);
+                    foreach (var line in block) Wrapped(sb, line, wrap);
+        }
+
+        // A panel's font is sized to its bars, so a long message runs off the edge; it breaks at the last space that
+        // fits, or mid-word when none does, and its continuation lines are indented so each still reads as one message.
+        static void Wrapped(StringBuilder sb, string line, int width)
+        {
+            var indent = "";
+            while (width > 2 && indent.Length + line.Length > width)
+            {
+                var room = width - indent.Length;
+                var cut = line.LastIndexOf(' ', room);
+                if (cut < 1) cut = room;
+                sb.Put(indent).Line(line.Cut(0, cut));
+                line = line.Cut(cut).TrimStart();
+                indent = "  ";
+            }
+            sb.Put(indent).Line(line);
         }
 
         // The bar always clamps to [0, BarWidth]; allowOver lets the trailing percent run past 100 (reserve quota

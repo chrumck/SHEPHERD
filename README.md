@@ -113,15 +113,17 @@ makes a status light instead (item 6), as many as you like.
    `, one disassembling` while one is lent to disassembly) — and a fill bar per category (`──catch-all──` when only
    a catch-all takes it, `──no route──` when nothing does), for the catch-all and per reserve pool. Below the rule:
    what production is doing and every problem that needs you. **Nothing below the rule = nothing to do.**
+   A message longer than `statusWrapChars` (40) continues on indented lines; the examples are shown unbroken.
    ```
    crafting Component/SteelPlate +70                     ← doing it
    disassembling Component/SteelPlate 400                ← doing it
    refining Ore/Iron for Ingot/Iron                      ← doing it
    learn Ore/Modium: measuring                           ← learning
+   learn Component/ModPlate: watching ModPlateBP on Main Assembler   ← waiting for your batch's first unit
    craft Component/ModAlloy: no blueprint                ← blocked
    refine Ingot/Iron: output has no room                 ← blocked
    craft Component/SteelPlate: disassembly queued        ← waiting for the opposite order
-   learn Component/ModAlloy: queue some alone on an assembler   ← needs you
+   learn Component/ModAlloy: batch some on Main Assembler   ← needs you: queue a batch there
    can't reach Refinery for Ores - check conveyor/sorter        ← needs you
    reserves Ammo and Ship both want All of Ingot/Iron - only one fills   ← needs you
    clearing stalled disassembly queue on Assembler 3     ← fixing it itself
@@ -208,6 +210,7 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `spikeMs` | `8` | 0.001–1000 | A run longer than this is a spike, its time divided by sim speed. At any sim speed, a second spike within `spikeWindowSeconds` pauses SHEPHERD's heavy work and screens until the first is that old. |
 | `spikeWindowSeconds` | `10.5` | ≥ 0 | That window, in real seconds. `0` = no pause. |
 | `startupSeconds` | `45` | ≥ 0 | For this long after a start (real seconds), SHEPHERD bundles its slow first steps into fewer runs and skips the `peakMs` back-off and the `parkSim` park. Keep it inside your server's startup allowance. `0` = off. |
+| `statusWrapChars` | `40` | 0–1000 | Status-panel messages longer than this break onto indented lines, so a font sized to fill the panel with its bars doesn't cut them off. `0` = never break. |
 
 **Machines.** A machine below its target pulls fuel or ore ahead of storage, refilled once it has burnt a
 quarter of the target; a refinery on a shortage you set up is filled at once. Output is collected every
@@ -241,7 +244,7 @@ reloaded 2 pools, 14 quotas, 3 overrides, 0 facts
 priority 0, dockedProduction
 peakMs 1.5, parkSim 0.75, resumeSim 0.8, backoffSim 1
 spikeMs 8, spikeWindowSeconds 10.5, startupSeconds 45
-fill % 15/50/30, bottles 3 min, pass 60 s, UTC+1
+fill % 15/50/30, bottles 3 min, pass 60 s, UTC+1, wrap 40
 ```
 
 ---
@@ -441,9 +444,16 @@ a given name, queue it, and watch what comes out. Blueprint names often differ f
 3. **Ingredients stay invisible:** SHEPHERD can't tell what a modded component consumes — give its ingots
    `A` quotas too.
 
-**Blueprints:** if an assembler that takes orders (the `Main`) is idle and empty at that moment, SHEPHERD tries
-likely names on it. If none work, or no assembler was free, the status panel asks you to queue the item — **alone on an assembler, as a batch** (a mixed queue can't be attributed; a single
-unit may finish before SHEPHERD looks).
+**Blueprints:** learning uses only the base's `[SHEPHERD-Main]` assembler — not a docked ship's, not a Coop, never
+an untagged one or a survival kit (`learn X: no Main assembler` until there is one). If the Main is idle and empty,
+SHEPHERD tries likely names on it. If none work, or the Main was busy, the status panel asks you to queue the item
+on the Main — **as a batch** (a single unit may finish, or be taken by a Coop, before SHEPHERD looks). SHEPHERD's own
+crafting may stay queued beside it, but no other modded item SHEPHERD doesn't know yet: two unknown entries can't be
+told apart. The line reads `learn X: batch some on <Main>` until SHEPHERD sees an entry it doesn't know there, then
+`learn X: watching <blueprint> on <Main>` — check that the blueprint named is your batch. If it was something else
+left on the Main, SHEPHERD notes what that one makes and goes back to asking. If it stays there, check the Main has
+the ingredients, or enter the recipe yourself under `[Recipes]` (the blueprint's name is in the mod's
+`Blueprints.sbc`) and `configReload`.
 
 **Ore yields:** measured only while an ingot shortfall is blocked, no known ore serves it, and at least 110
 of the unknown ore is available. SHEPHERD isolates one refinery, feeds it only that ore, and records the

@@ -202,7 +202,7 @@ namespace IngameScript
             return was;
         }
 
-        void Remember(string itemKey, string blueprint)
+        public void Remember(string itemKey, string blueprint)
         {
             blueprintOf[itemKey] = blueprint;
             itemOf[blueprint] = itemKey;

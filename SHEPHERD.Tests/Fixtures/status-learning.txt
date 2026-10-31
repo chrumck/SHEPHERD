@@ -13,4 +13,5 @@ Others         ──no route──
 Spare          ░░░░░░░░░░ 0%
 ─────────────────────────
 learning - nothing to save yet
-craft Component/SteelPlate: no Main assembler
+craft Component/SteelPlate: no Main
+  assembler

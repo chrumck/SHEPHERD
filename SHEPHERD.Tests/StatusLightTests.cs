@@ -51,7 +51,7 @@ namespace SHEPHERD.Tests
             var h = Base("[Reserve:Spare]\nComponent/SteelPlate=100MA\n");
             var status = h.AddPanel("Status [SHEPHERD]");
             var light = h.AddLight("Lamp [SHEPHERD]");
-            h.TickUntil(() => Shows(status, "idle") && status[status.Count - 1].Contains("no Main assembler"));
+            h.TickUntil(() => Shows(status, "idle") && status[status.Count - 1].Contains("no Main"));
             Assert.Equal(Color.Yellow, Shown(light));
         }
 

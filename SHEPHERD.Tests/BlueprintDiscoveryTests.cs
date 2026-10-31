@@ -160,6 +160,132 @@ namespace SHEPHERD.Tests
             Assert.Null(probe.Blueprint);
         }
 
+        static BlueprintProbe ManualProbe()
+        {
+            var probe = new BlueprintProbe();
+            probe.Plan("Component/Requested", new List<AssemblerSnapshot>(), new List<CraftAction>());
+            return probe;
+        }
+
+        [Fact]
+        public void ManualTeachingLearnsAUnitMadeAfterTheOutputWasEmptied()
+        {
+            var assembler = new Assembler(1);
+            assembler.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            assembler.Output["Component/Requested"] = 1;
+            var probe = ManualProbe();
+            var states = new List<IAssemblerState> { assembler };
+            var facts = new ProductionFacts();
+            probe.Observe(states, facts);
+            assembler.Output.Clear();
+            Assert.Equal(BlueprintObservation.None, probe.Observe(states, facts));
+            assembler.Output["Component/Requested"] = 1;
+            Assert.Equal(BlueprintObservation.Learned, probe.Observe(states, facts));
+            Assert.Equal("UnknownBlueprint", probe.Blueprint);
+        }
+
+        [Fact]
+        public void ManualTeachingWatchesOnlyTheHomeMain()
+        {
+            var kit = new Assembler(1) { Mark = AssemblerMark.None, IsReceiver = false };
+            kit.Queue.Add(new QueueEntry { Blueprint = "Stuck", Amount = 1 });
+            var docked = new Assembler(2) { Construct = 1 };
+            docked.Queue.Add(new QueueEntry { Blueprint = "Docked", Amount = 1 });
+            var main = new Assembler(3);
+            var probe = ManualProbe();
+            var states = new List<IAssemblerState> { kit, docked, main };
+            var facts = new ProductionFacts();
+            probe.Observe(states, facts);
+            Assert.Equal(0, probe.ReservedAssemblerId);
+            Assert.Equal("learn Component/Requested: batch some on A3", probe.Status);
+            main.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            probe.Observe(states, facts);
+            Assert.Equal(3, probe.ReservedAssemblerId);
+            Assert.Equal("learn Component/Requested: watching UnknownBlueprint on A3", probe.Status);
+        }
+
+        [Fact]
+        public void ManualTeachingWithoutAHomeMainSaysSo()
+        {
+            var kit = new Assembler(1) { Mark = AssemblerMark.None, IsReceiver = false };
+            kit.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            var probe = ManualProbe();
+            probe.Observe(new List<IAssemblerState> { kit, new Assembler(2) { Construct = 1 } }, new ProductionFacts());
+            Assert.Equal(0, probe.ReservedAssemblerId);
+            Assert.Equal("learn Component/Requested: no Main assembler", probe.Status);
+        }
+
+        [Fact]
+        public void ManualTeachingLetsGoOfAMainThatStopsWorking()
+        {
+            var main = new Assembler(1);
+            main.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            var probe = ManualProbe();
+            var states = new List<IAssemblerState> { main };
+            var facts = new ProductionFacts();
+            probe.Observe(states, facts);
+            Assert.Equal(1, probe.ReservedAssemblerId);
+            main.IsWorking = false;
+            probe.Observe(states, facts);
+            Assert.Equal(0, probe.ReservedAssemblerId);
+            probe.Observe(states, facts);
+            Assert.Equal(0, probe.ReservedAssemblerId);
+        }
+
+        [Fact]
+        public void ManualTeachingIgnoresKnownWorkQueuedBesideTheItem()
+        {
+            var main = new Assembler(1);
+            main.Queue.Add(new QueueEntry { Blueprint = "SteelPlate", Amount = 5 });
+            main.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            var facts = new ProductionFacts();
+            facts.Learn("Component/SteelPlate", "SteelPlate");
+            var probe = ManualProbe();
+            var states = new List<IAssemblerState> { main };
+            probe.Observe(states, facts);
+            Assert.Equal(1, probe.ReservedAssemblerId);
+            main.Output["Component/SteelPlate"] = 5;
+            Assert.Equal(BlueprintObservation.None, probe.Observe(states, facts));
+            Assert.Equal(1, probe.ReservedAssemblerId);
+            main.Output["Component/Requested"] = 1;
+            Assert.Equal(BlueprintObservation.Learned, probe.Observe(states, facts));
+            Assert.Equal("UnknownBlueprint", probe.Blueprint);
+        }
+
+        [Fact]
+        public void ManualTeachingWaitsWhileTwoUnknownBlueprintsAreQueued()
+        {
+            var main = new Assembler(1);
+            main.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            main.Queue.Add(new QueueEntry { Blueprint = "OtherUnknown", Amount = 10 });
+            var probe = ManualProbe();
+            probe.Observe(new List<IAssemblerState> { main }, new ProductionFacts());
+            Assert.Equal(0, probe.ReservedAssemblerId);
+        }
+
+        [Fact]
+        public void ALeftoverUnknownEntryIsNotedOnceItShowsWhatItMakes()
+        {
+            var main = new Assembler(1);
+            main.Queue.Add(new QueueEntry { Blueprint = "Leftover", Amount = 5 });
+            var facts = new ProductionFacts();
+            var probe = ManualProbe();
+            var states = new List<IAssemblerState> { main };
+            probe.Observe(states, facts);
+            Assert.Equal("learn Component/Requested: watching Leftover on A1", probe.Status);
+            main.Output["Component/Other"] = 1;
+            Assert.Equal(BlueprintObservation.None, probe.Observe(states, facts));
+            Assert.Equal(0, probe.ReservedAssemblerId);
+            Assert.True(facts.IsBlueprintKnown("Leftover"));
+            main.Queue.Add(new QueueEntry { Blueprint = "UnknownBlueprint", Amount = 10 });
+            probe.Observe(states, facts);
+            Assert.Equal("learn Component/Requested: watching UnknownBlueprint on A1", probe.Status);
+            main.Output["Component/Other"] = 2;
+            main.Output["Component/Requested"] = 1;
+            Assert.Equal(BlueprintObservation.Learned, probe.Observe(states, facts));
+            Assert.Equal("UnknownBlueprint", probe.Blueprint);
+        }
+
         [Fact]
         public void ProbeUsesOnlyAnAssemblerThatTakesOrders()
         {

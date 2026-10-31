@@ -264,3 +264,6 @@ Several SHEPHERD PBs within each other's reach elect one leader; the rest stand 
 4. Messages, in order: learn mode's preview (lines starting with `learn `, only while `learning`), production actions
    (starting with `crafting `, `disassembling ` or `refining `), then standing states, which stay while their
    condition holds. Discovery states also start with `learn ` (`learn X: probing`).
+5. A message longer than `[Settings] statusWrapChars` (default 40; `0` = never) is broken at the last space that
+   fits, or mid-word when none does; each continuation line starts with two spaces, which no message does, so a
+   continuation can be told from a new message. The standing-by panel's leader line is broken the same way.

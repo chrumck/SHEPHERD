@@ -72,7 +72,7 @@ namespace SHEPHERD.Tests
             discovery.Reconcile(craft.NeedBlueprint, refine.NeedYield);
             probe.Plan(Item, new List<AssemblerSnapshot>(), new List<CraftAction>());
             Compose();
-            Assert.Equal(new[] { "learn " + Item + ": queue some alone on an assembler" }, status.States);
+            Assert.Equal(new[] { "learn " + Item + ": no Main assembler" }, status.States);
         }
 
         [Fact]

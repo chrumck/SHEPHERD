@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Text;
 using IngameScript;
@@ -238,6 +240,40 @@ namespace SHEPHERD.Tests
             Assert.Contains("2 Assemblers Controlled, one disassembling", sb.ToString());
             StatusView.Render(sb, "1.0.0", "Base PB", "working", "00:00:00", new List<CategoryFill>(), NoReserves, null);
             Assert.DoesNotContain("Controlled", sb.ToString());
+        }
+
+        static string[] MessageLines(int wrap, params string[] lines)
+        {
+            var sb = new StringBuilder();
+            StatusView.Render(sb, "1.0.0", "Base PB", "working", "00:00:00", new List<CategoryFill>(), NoReserves,
+                new List<List<string>> { Block(lines) }, -1, false, wrap);
+            var all = sb.ToString().Replace("\r", "").TrimEnd('\n').Split('\n');
+            var rule = Array.IndexOf(all, new string('─', 25));
+            return all.Skip(rule + 1).ToArray();
+        }
+
+        [Fact]
+        public void ALongMessageBreaksAtTheLastSpaceThatFitsWithItsContinuationIndented()
+        {
+            Assert.Equal(new[] { "learn Component/ShieldComponent: watching", "  Base01 Assembler [SHEPHERD-Main]" },
+                MessageLines(44, "learn Component/ShieldComponent: watching Base01 Assembler [SHEPHERD-Main]"));
+            Assert.Equal(new[] { "learn Component/ShieldComponent:", "  watching Base01 Assembler", "  [SHEPHERD-Main]" },
+                MessageLines(40, "learn Component/ShieldComponent: watching Base01 Assembler [SHEPHERD-Main]"));
+        }
+
+        [Fact]
+        public void AWordLongerThanTheWidthIsCutMidWord()
+        {
+            Assert.Equal(new[] { "craft", "  Component/Ver", "  yLongName", "  done" },
+                MessageLines(15, "craft Component/VeryLongName done"));
+        }
+
+        [Fact]
+        public void AMessageThatFitsOrAWrapOfZeroLeavesTheLineWhole()
+        {
+            Assert.Equal(new[] { "craft X: no blueprint" }, MessageLines(21, "craft X: no blueprint"));
+            Assert.Equal(new[] { "learn Component/ShieldComponent: watching Base01 Assembler" },
+                MessageLines(0, "learn Component/ShieldComponent: watching Base01 Assembler"));
         }
     }
 }

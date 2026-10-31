@@ -82,12 +82,13 @@ namespace IngameScript
 
     public class BlueprintProbe
     {
-        readonly Dictionary<string, double> baseline = new Dictionary<string, double>();
-        readonly Dictionary<string, double> output = new Dictionary<string, double>();
+        Dictionary<string, double> baseline = new Dictionary<string, double>();
+        Dictionary<string, double> output = new Dictionary<string, double>();
         readonly List<QueueEntry> queue = new List<QueueEntry>();
-        int manualCursor;
+        // What the watched queue's known blueprints make: their output rising says nothing about the unknown one.
+        readonly List<string> expected = new List<string>();
         long manualAssembler;
-        string manualBlueprint;
+        string manualBlueprint, mainName;
 
         public BlueprintPhase Phase;
         public string Item;
@@ -95,10 +96,11 @@ namespace IngameScript
         public long ReservedAssemblerId => AssemblerId != 0 ? AssemblerId : manualAssembler;
         public string Blueprint;
         public bool NeedsObservation => Phase == BlueprintPhase.Observing || Phase == BlueprintPhase.Manual;
-        // The watch needs the item to be the assembler's ONLY queue entry (a second entry makes the output
-        // unattributable) and needs that entry to still be there when the next observation tick looks — so ask for
-        // a batch, not a single unit a fast assembler would finish first.
-        public string Status => Phase == BlueprintPhase.Manual ? "learn " + Item + ": queue some alone on an assembler"
+        // The watch needs the entry to still be there when the next observation tick looks, so ask for a batch, not
+        // a single unit a fast assembler (or the Coops pulling from it) would finish first. The watched blueprint is
+        // named so the player can tell their batch from something else left unknown on the Main.
+        public string Status => Phase == BlueprintPhase.Manual ? "learn " + Item + (mainName == null ? ": no Main assembler"
+                : manualAssembler != 0 ? ": watching " + manualBlueprint + " on " + mainName : ": batch some on " + mainName)
             : Phase == BlueprintPhase.Queued || Phase == BlueprintPhase.Observing ? "learn " + Item + ": probing"
             : Phase == BlueprintPhase.Protecting ? "learn " + Item + ": preparing" : null;
 
@@ -111,7 +113,8 @@ namespace IngameScript
                 foreach (var snapshot in assemblers)
                 {
                     var assembler = snapshot.State;
-                    if (!snapshot.QueueEmpty || !assembler.IsReceiver || !assembler.IsWorking || assembler.IsDisassembling
+                    if (IsHomeMain(assembler)) mainName = assembler.Name;
+                    if (!snapshot.QueueEmpty || !IsHomeMain(assembler) || !assembler.IsWorking || assembler.IsDisassembling
                         || HasAction(actions, assembler.Id)) continue;
                     var candidate = Candidate(item, assembler);
                     if (candidate == null) continue;
@@ -124,7 +127,7 @@ namespace IngameScript
             }
 
             var selected = Find(assemblers, AssemblerId);
-            if (selected.State == null || !selected.QueueEmpty || !selected.State.IsReceiver || !selected.State.IsWorking
+            if (selected.State == null || !selected.QueueEmpty || !IsHomeMain(selected.State) || !selected.State.IsWorking
                 || selected.State.IsDisassembling || HasAction(actions, AssemblerId))
             {
                 AssemblerId = 0;
@@ -148,37 +151,53 @@ namespace IngameScript
                 var assembler = Find(assemblers, AssemblerId);
                 if (assembler == null) return BlueprintObservation.Manual;
                 assembler.OutputInto(output);
-                bool ambiguous;
-                if (ProducedItem(out ambiguous)) return BlueprintObservation.Learned;
-                if (ambiguous) return BlueprintObservation.Manual;
+                string other;
+                var found = ProducedItem(out other);
+                if (other != null) return BlueprintObservation.Manual;
+                if (found) return BlueprintObservation.Learned;
                 assembler.QueueInto(queue);
-                if (!HasBlueprint(queue, Blueprint)) return BlueprintObservation.Manual;
+                if (Queued(queue, Blueprint) <= 0) return BlueprintObservation.Manual;
                 return BlueprintObservation.None;
             }
-            if (Phase != BlueprintPhase.Manual || assemblers.Count == 0) return BlueprintObservation.None;
+            if (Phase != BlueprintPhase.Manual) return BlueprintObservation.None;
             if (manualAssembler != 0)
             {
                 var assembler = Find(assemblers, manualAssembler);
-                if (assembler == null) { ClearManualWatch(); return BlueprintObservation.None; }
+                if (assembler == null || !assembler.IsWorking) { ClearManualWatch(); return BlueprintObservation.None; }
                 assembler.OutputInto(output);
-                bool ambiguous;
-                if (ProducedItem(out ambiguous)) { Blueprint = manualBlueprint; return BlueprintObservation.Learned; }
-                if (ambiguous) { ClearManualWatch(); return BlueprintObservation.None; }
+                string other;
+                var found = ProducedItem(out other);
+                if (found && other == null) { Blueprint = manualBlueprint; return BlueprintObservation.Learned; }
+                // It made one other item: the entry was something else left unknown on the Main. Noting that for the
+                // session makes it count as known; otherwise it would be picked and watched again on every look.
+                if (!found && other != "" && other != null) facts.Remember(other, manualBlueprint);
                 assembler.QueueInto(queue);
-                if (!HasBlueprint(queue, manualBlueprint)) ClearManualWatch();
+                if (other != null || Queued(queue, manualBlueprint) <= 0) ClearManualWatch();
                 return BlueprintObservation.None;
             }
 
-            if (manualCursor >= assemblers.Count) manualCursor = 0;
-            var next = assemblers[manualCursor++];
-            if (next.IsDisassembling) return BlueprintObservation.None;
-            next.QueueInto(queue);
-            if (queue.Count != 1 || facts.IsBlueprintKnown(queue[0].Blueprint)) return BlueprintObservation.None;
-            manualAssembler = next.Id;
-            manualBlueprint = queue[0].Blueprint;
-            next.OutputInto(baseline);
+            // Only the home Main: any other assembler may be one that can't make the item at all (a survival kit), and
+            // a queue left on it would be watched for nothing. SHEPHERD queues its own work on the Main too, so the
+            // queue need not be alone — only the one blueprint SHEPHERD doesn't know can be attributed.
+            IAssemblerState main = null;
+            foreach (var a in assemblers) if (IsHomeMain(a)) main = a;
+            mainName = main?.Name;
+            if (main == null || main.IsDisassembling || !main.IsWorking) return BlueprintObservation.None;
+            main.QueueInto(queue);
+            string unknown = null;
+            expected.Empty();
+            foreach (var e in queue)
+                if (facts.IsBlueprintKnown(e.Blueprint)) expected.Push(facts.ItemOf(e.Blueprint));
+                else if (unknown == null || unknown == e.Blueprint) unknown = e.Blueprint;
+                else return BlueprintObservation.None;
+            if (unknown == null) return BlueprintObservation.None;
+            manualAssembler = main.Id;
+            manualBlueprint = unknown;
+            main.OutputInto(baseline);
             return BlueprintObservation.None;
         }
+
+        static bool IsHomeMain(IAssemblerState a) => a.IsReceiver && a.Mark == AssemblerMark.Main && a.Construct == 0;
 
         public bool OwnsOutput(long id) => ReservedAssemblerId != 0 && ReservedAssemblerId == id;
 
@@ -191,8 +210,7 @@ namespace IngameScript
 
         public void Reset()
         {
-            Item = null;
-            Blueprint = null;
+            Item = Blueprint = mainName = null;
             AssemblerId = 0;
             Phase = BlueprintPhase.Idle;
             baseline.Empty();
@@ -207,19 +225,27 @@ namespace IngameScript
             Phase = BlueprintPhase.Protecting;
         }
 
-        bool ProducedItem(out bool ambiguous)
+        // Whether the item rose since the last reading; other is the one unexpected item that rose too, "" when several
+        // did, null when none.
+        bool ProducedItem(out string other)
         {
-            ambiguous = false;
+            other = null;
             var found = false;
             foreach (var pair in output)
             {
                 double before;
                 baseline.Get(pair.Key, out before);
                 if (pair.Value <= before) continue;
-                if (pair.Key != Item) { ambiguous = true; continue; }
-                found = true;
+                if (pair.Key == Item) found = true;
+                else if (!expected.Contains(pair.Key)) other = other == null ? pair.Key : "";
             }
-            return found && !ambiguous;
+            // Each reading is compared with the last, not the first: a watched output isn't protected until the next
+            // rescan, so the sort can empty it meanwhile, and a unit made after that never climbs back over the
+            // first reading. A unit can't arrive and leave between two readings — a move takes two ticks.
+            var last = baseline;
+            baseline = output;
+            output = last;
+            return found;
         }
 
         void ClearManualWatch()
@@ -227,6 +253,7 @@ namespace IngameScript
             manualAssembler = 0;
             manualBlueprint = null;
             baseline.Empty();
+            expected.Empty();
         }
 
         static string Candidate(string item, IAssemblerState assembler)
@@ -249,11 +276,12 @@ namespace IngameScript
             return false;
         }
 
-        static bool HasBlueprint(List<QueueEntry> entries, string blueprint)
+        static double Queued(List<QueueEntry> entries, string blueprint)
         {
+            var amount = 0.0;
             foreach (var entry in entries)
-                if (entry.Blueprint == blueprint) return true;
-            return false;
+                if (entry.Blueprint == blueprint) amount += entry.Amount;
+            return amount;
         }
 
         static AssemblerSnapshot Find(List<AssemblerSnapshot> assemblers, long id)

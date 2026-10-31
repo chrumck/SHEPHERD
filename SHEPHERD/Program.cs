@@ -33,7 +33,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.41";
+        const string ScriptVersion = "1.0.45";
 
         // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
         // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
@@ -104,10 +104,10 @@ namespace IngameScript
         // {low, high, default}; priority is any whole number and the three switches are true/false.
         static readonly string[] SettingKeys = ("utcOffsetHours,reactorFillPct,gasGenFillPct,refineryFillPct,bottleSweepMinutes,"
             + "sortPassSeconds,priority,factionShare,dockedProduction,dockedFuel,peakMs,parkSim,resumeSim,backoffSim,spikeMs,"
-            + "spikeWindowSeconds,startupSeconds").Split(',');
+            + "spikeWindowSeconds,startupSeconds,statusWrapChars").Split(',');
         const int UtcOffset = 0, ReactorFill = 1, GasGenFill = 2, RefineryFill = 3, BottleSweep = 4, SortPass = 5, Priority = 6,
             FactionShare = 7, DockedProduction = 8, DockedFuel = 9, PeakMs = 10, ParkSim = 11, ResumeSim = 12, BackoffSim = 13,
-            SpikeMs = 14, SpikeWindow = 15, Startup = 16;
+            SpikeMs = 14, SpikeWindow = 15, Startup = 16, StatusWrap = 17;
         static readonly double[] SettingRules =
         {
             -14, 14, 0,
@@ -126,7 +126,8 @@ namespace IngameScript
             0, 1, Pacer.DefaultBackoffSim,
             0.001, 1000, Pacer.DefaultSpikeMs,
             0, 1e6, Pacer.DefaultSpikeWindowSec,
-            0, 1e6, DefaultStartupSeconds
+            0, 1e6, DefaultStartupSeconds,
+            0, 1000, 40
         };
 
         readonly List<IMyTerminalBlock> blockBuffer = new List<IMyTerminalBlock>();
@@ -183,7 +184,7 @@ namespace IngameScript
         long persistedDisassembler;      // the tracking state as last written, so a flush fires only on the edge
         // [Settings], indexed by the constants above. A sort pass's cap trades a rescan's few seconds of phase ticks
         // against how stale re-planning, reserve counts and a due bottle sweep get while a backlog stretches the pass.
-        readonly double[] settings = new double[17];
+        readonly double[] settings = new double[18];
         readonly PeerElection election = new PeerElection();
         readonly IMyBroadcastListener leadListener;
         string leader;                   // the live peer this PB stands by for; null while it does the work
@@ -1497,7 +1498,8 @@ namespace IngameScript
                  + ", backoffSim " + settings[BackoffSim]
                  + "\nspikeMs " + settings[SpikeMs] + ", spikeWindowSeconds " + settings[SpikeWindow] + ", startupSeconds " + settings[Startup]
                  + "\nfill % " + settings[ReactorFill] + "/" + settings[GasGenFill] + "/" + settings[RefineryFill]
-                 + ", bottles " + settings[BottleSweep] + " min, pass " + settings[SortPass] + " s, UTC" + (settings[UtcOffset] < 0 ? "" : "+") + settings[UtcOffset];
+                 + ", bottles " + settings[BottleSweep] + " min, pass " + settings[SortPass] + " s, UTC" + (settings[UtcOffset] < 0 ? "" : "+") + settings[UtcOffset]
+                 + ", wrap " + settings[StatusWrap];
         }
 
         static bool IsSwitch(int setting) => setting > Priority && setting <= DockedFuel;
@@ -1659,7 +1661,8 @@ namespace IngameScript
             if (renderCursor == 2) { RenderLogLcd(); return; }
             PaintLights(Color.Lime);
             if (statusLcd == null) return;
-            StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, "standing by", Clock.Hms(CurrentTime()), null, null, standbyMessages);
+            StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, "standing by", Clock.Hms(CurrentTime()), null, null, standbyMessages,
+                -1, false, (int)settings[StatusWrap]);
             WriteSurface(statusLcd, renderBuffer.ToString(), true);
         }
 
@@ -1714,7 +1717,7 @@ namespace IngameScript
             BuildCategoryFills();
             BuildReserveFills();
             StatusView.Render(renderBuffer, ScriptVersion, Me.CustomName, Health(false), Clock.Hms(CurrentTime()), categoryFills, reserveFills, statusMessages,
-                markCheck.Controlled, craftPlanner.TrackedDisassembler != 0);
+                markCheck.Controlled, craftPlanner.TrackedDisassembler != 0, (int)settings[StatusWrap]);
             WriteSurface(statusLcd, renderBuffer.ToString(), true);
         }
 
