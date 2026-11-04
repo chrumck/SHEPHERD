@@ -49,7 +49,6 @@ namespace IngameScript
 
     public sealed partial class ManagedScope
     {
-        // A scope of the home construct alone, owned by `owner`.
         public static ManagedScope Home(IMyCubeGrid home, long owner = 0)
         {
             var scope = new ManagedScope();

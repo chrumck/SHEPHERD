@@ -3,8 +3,7 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // The minimal MyIni surface the persistence merge needs, behind an interface so the merge algorithm
-    // (ConfigStore) stays game-free and offline-testable. The live implementation wraps MyIni (Program).
+    // Keeps ConfigStore's merge game-free and offline-testable.
     public interface IIniDocument
     {
         bool TryParse(string text, out string error);
@@ -16,10 +15,8 @@ namespace IngameScript
         string ToText();
     }
 
-    // The one component allowed to write Me.CustomData, made game-free by delegating all ini I/O to an
-    // IIniDocument. It owns the set of SHEPHERD-managed section names; a flush rewrites only those sections from the
-    // in-memory model (in-memory authoritative) and never touches the user's own sections, keys, or comments
-    // (merge-not-clobber). Reads (reserve quotas, category overrides) go through ReadSection.
+    // The only writer of Me.CustomData. A flush rewrites only the managed sections from the in-memory model; the
+    // user's own sections, keys and comments stay untouched.
     public partial class ConfigStore
     {
         readonly IIniDocument doc;
@@ -35,8 +32,7 @@ namespace IngameScript
 
         public void SectionNames(List<string> into) => doc.SectionNames(into);
 
-        // The key->value pairs of a section (empty when the section is absent). Called at load only, so a fresh
-        // list is fine — never on a per-cycle path.
+        // Called at load only, so a fresh list is fine.
         public List<KeyValuePair<string, string>> ReadSection(string section)
         {
             var into = new List<KeyValuePair<string, string>>();
@@ -47,10 +43,7 @@ namespace IngameScript
             return into;
         }
 
-        // MyIni keeps a trailing inline comment (key=value ; note) as part of the value, so strip it before a reader
-        // parses it — no SHEPHERD value (quota numbers, category tokens) contains ';'. The user's comment survives in
-        // the file untouched: it is only cleaned out of the value we parse, never rewritten (reserve is unmanaged; a
-        // comment inside a managed section is dropped on the next rewrite, per in-memory-authoritative merge).
+        // MyIni keeps an inline comment (key=value ; note) as part of the value; no SHEPHERD value contains ';'.
         string Value(string section, string key) => StripInlineComment(doc.Get(section, key));
 
         public static string StripInlineComment(string value)
@@ -60,9 +53,8 @@ namespace IngameScript
             return (semi >= 0 ? value.Cut(0, semi) : value).Trim();
         }
 
-        // Rewrite one managed section wholesale from the model: set every entry, then delete any managed-section key
-        // no longer present (in-memory authoritative — a user edit to a managed value takes effect via configReload
-        // re-seeding the model, not by surviving a flush). Only this section is touched, so unmanaged content lives.
+        // The model is authoritative: a hand edit to a managed value takes effect by configReload re-seeding the
+        // model, not by surviving a flush.
         public void MergeSection(string section, IEnumerable<KeyValuePair<string, string>> entries)
         {
             var wanted = new HashSet<string>();
@@ -74,17 +66,15 @@ namespace IngameScript
                 if (!wanted.Contains(key)) doc.DeleteKey(section, key);
         }
 
-        // Write one item's value into a user-owned section: onto the line already holding that item, even one written
-        // with the MyObjectBuilder_ prefix, else as a new line — so learning never leaves two lines for one item. Two
-        // lookups, not a walk of the section: a learn save writes every line of a pool.
+        // Reuses a line written with the MyObjectBuilder_ prefix, so learning never leaves two lines for one item. Two
+        // lookups, not a section walk: a learn save writes every line of a pool.
         public void SetItem(string section, string key, string value)
         {
             var prefixed = Category.BuilderPrefix + key;
             doc.Set(section, doc.Get(section, key) == null && doc.Get(section, prefixed) != null ? prefixed : key, value);
         }
 
-        // Add each entry whose key the section lacks, leaving every line already there as written — a bad value
-        // included, since it is logged and the user's to fix. Reports whether anything was added.
+        // Existing lines stay as written, a bad value included: it is logged and the user's to fix.
         public bool AddMissing(string section, List<KeyValuePair<string, string>> entries)
         {
             keyScratch.Empty();
@@ -106,8 +96,7 @@ namespace IngameScript
 
         public string ToText() => doc.ToText();
 
-        // A canonical string of every managed section's entries (sections in document order, keys sorted) so an
-        // unchanged set re-flushes to the same signature and the write can be skipped. Built only on flush (rare).
+        // Keys sorted so an unchanged set gives the same signature and the write is skipped.
         public string Signature()
         {
             sectionScratch.Empty();

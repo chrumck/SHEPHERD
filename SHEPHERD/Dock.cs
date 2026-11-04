@@ -5,10 +5,8 @@ using VRage.Game.ModAPI.Ingame;
 
 namespace IngameScript
 {
-    // Which blocks one SHEPHERD manages: its own construct (home, index 0) plus every construct docked to it through a
-    // chain of connected connectors, minus whatever lies behind a [SHEPHERD-Split] connector, minus blocks another
-    // player owns. Rebuilt from the live connectors each scan, so a dock, an undock or a retag shows on the next one.
-    // Constructs, not grids: rotor and piston subgrids belong to the construct they hang off.
+    // Rebuilt from the live connectors each scan, so a dock, an undock or a retag shows on the next one. Constructs,
+    // not grids: rotor and piston subgrids belong to the construct they hang off.
     public partial class ManagedScope
     {
         readonly List<IMyCubeGrid> constructs = new List<IMyCubeGrid>(); // one grid per construct, home first

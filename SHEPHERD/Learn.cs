@@ -3,16 +3,13 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // One learned reserve line, ready to write into the user's [Reserve] / [Reserve:Name] section.
     public struct QuotaLine
     {
         public string Section, Key, Value;
     }
 
-    // Infers category overrides and reserve quotas from where the user has put items (learn mode). One sweep is Begin,
-    // a Teach call per stack read from a teacher container, then Finish against the current config, which leaves the
-    // pending changes and their preview lines. Each sweep starts from nothing, so an item moved away between sweeps
-    // simply drops out of the preview. Absence never removes anything: only a placement teaches.
+    // Each sweep starts from nothing, so an item moved away between sweeps drops out of the preview. Absence never
+    // removes anything: only a placement teaches.
     public partial class PlacementLearner
     {
         // Item key -> the distinct tokens it was found under, its own built-in category included.
@@ -48,7 +45,7 @@ namespace IngameScript
             taughtAtHome.Empty();
         }
 
-        // A stack of item `key` sits in a single-category container tagged `token`; builtIn is the item's own bucket.
+        // Only for a single-category container: a multi-category one doesn't teach.
         public void TeachCategory(string token, string key, string builtIn)
         {
             if (token == builtIn) atBuiltIn.Push(key);

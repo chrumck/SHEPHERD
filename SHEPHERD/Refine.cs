@@ -3,10 +3,8 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // One demand-first refining assignment: feed Ore, up to the remaining amount, to fill the Ingot deficit that
-    // motivated it. Doubles as the constrained feed's claim ledger on the sort path — Allows filters the feed to
-    // the selected ore, Cap/Took book each moved amount so the request can never over-feed within its cycle.
-    // Dies with the cycle (the feeds it constrains are rebuilt every scan), so no recovery is ever needed.
+    // Also the constrained feed's claim ledger on the sort path: Claim/Complete book each move so the request never
+    // over-feeds within its cycle. It dies with the cycle (the feeds are rebuilt every scan), so it needs no recovery.
     public class FeedRequest
     {
         public readonly string Ore;
@@ -38,10 +36,8 @@ namespace IngameScript
         }
     }
 
-    // The refinery view the refine planner commands (live: the refinery's MachineFeed; tests: a mock). CanTake is
-    // the compatibility-and-room probe; Constrain hands the feed its assignment for this cycle. A constrained feed
-    // takes ONLY the requested ore, capped — so demand-first work and greedy backfill never command the same
-    // refinery, and the planner assigning each feed at most once per plan is the whole ownership rule.
+    // A constrained feed takes only the requested ore, capped, so demand-first work and greedy backfill never command
+    // one refinery, and assigning each feed at most once per plan is the whole ownership rule.
     public interface IRefineryFeed
     {
         long Id { get; }
@@ -51,11 +47,8 @@ namespace IngameScript
         void Constrain(FeedRequest request);
     }
 
-    // The game-free Refine planner: one pass per cycle over the filled ledger and the cycle's refinery feeds,
-    // choosing which known ore each free refinery should refine to fill the A-enabled ingot deficits. Deficits are
-    // already net of stock, queued work, and the expected output of ore sitting in refinery inputs (the ledger's
-    // math), so a request in flight suppresses re-requesting — write-on-change by construction. Ores are scored
-    // across every live deficit (multi-output ores count each), highest score first, ties by ordinal key order.
+    // Deficits come net of stock, queued work and ore already in refinery inputs (the ledger's math), so a request in
+    // flight suppresses re-requesting: write-on-change by construction.
     public class RefinePlanner
     {
         readonly List<FeedRequest> requests = new List<FeedRequest>();
@@ -75,12 +68,10 @@ namespace IngameScript
 
         public List<FeedRequest> Requests => requests;
         public List<string> NeedYield => needYield;
-        // Unknown-yield ores a live deficit wants sampled but whose available stock is below the sample target —
-        // the caller withholds these from open greedy feeds so the stock can accumulate instead of trickling
-        // into refinery inputs (ledger-protected there, so the sample bar would never be reached).
+        // Unknown-yield ores short of a sample, withheld from open greedy feeds so the stock can accumulate: once in a
+        // refinery input it is ledger-protected, so the sample bar would never be reached.
         public List<string> UnderSampled => underSampled;
-        // Pre-formatted diagnostic lines (no room / no refinery / no ore) — recomputed per plan, so they persist
-        // on the status LCD while blocked and the transition log emits each only on entry.
+        // Recomputed per plan, so a line holds on the status LCD while blocked and the log emits it only on entry.
         public List<string> Blocked => blocked;
         public string YieldReason;
 
@@ -139,9 +130,8 @@ namespace IngameScript
             FinishBlocked(yieldSample);
         }
 
-        // Split the ledger's keys into the active ingot deficits (dropping any whose output has nowhere to land —
-        // refining into a jammed grid just strands ingots in outputs) and the consumable ore supply, known-yield
-        // and unknown apart. Below one whole ingot is the deadband: at target, not a work order.
+        // A deficit whose output has nowhere to land is dropped: refining into a jammed grid only strands ingots in
+        // outputs. Below one whole ingot is the deadband.
         void Collect(ProductionLedger ledger, ProductionFacts facts, Func<string, bool> outputHasRoom, double yieldSample)
         {
             deficitKeys.Empty();
@@ -174,9 +164,7 @@ namespace IngameScript
             }
         }
 
-        // The highest-scoring consumable known ore: score = over its outputs, the deficit actually closed by
-        // feeding everything available (min of possible gain and remaining deficit). Ties break by ordinal key
-        // order so the choice is stable across cycles, never a churn between equal ores.
+        // Ties break by ordinal key so the choice is stable across cycles, never a churn between equal ores.
         int BestOre(ProductionFacts facts)
         {
             var best = -1;
@@ -217,11 +205,8 @@ namespace IngameScript
             return null;
         }
 
-        // A deficit left uncovered is a blocked state worth telling the user about — but only when a refinery is
-        // still free to act: with none free the no-refinery line already names the real bottleneck, and asking for
-        // yield learning would be noise (learning needs a refinery too). Unknown ore with a full sample means the
-        // answer is a yield; a short sample says how much to add; otherwise there is simply no ore. UnderSampled
-        // holds its protection only while a deficit stands — without demand, unknown ores feed freely.
+        // Only while a refinery is free: with none, the no-refinery line names the real bottleneck and a yield request
+        // would be noise. UnderSampled protects its ores only while a deficit stands; without one they feed freely.
         void FinishBlocked(double sampleNeed)
         {
             var remaining = false;

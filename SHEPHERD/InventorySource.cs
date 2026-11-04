@@ -4,28 +4,21 @@ using VRage.Game.ModAPI.Ingame;
 
 namespace IngameScript
 {
-    // Live ISortSource: binds SortJob's game-free contract to one real inventory. All instances share one reusable
-    // item buffer — a hard invariant, not a convenience: at most ONE source may be walked per tick, since a second
-    // Refresh in the same tick silently corrupts the first walker's snapshot (SortJob/BottleJob honor this by
-    // touching one source per step; Program's own reads, such as the learn sweep's, borrow the buffer only on ticks
-    // where no job walks a source). Instances are pooled and rebound across cycles (Rebind) rather than reallocated.
-    //
-    // Also a return target for the bottle sweep: a tank's Contents transfers a bottle back INTO an InventorySource.
-    // The acceptor face carries no categories (bottles aren't routed on
-    // the way back — they go to a known source) and just answers "room for one unit?".
+    // All instances share one item buffer, so only one source may be walked at a time: a Refresh silently overwrites
+    // the previous walker's snapshot. Program's own reads borrow it only on ticks where no job walks a source.
     public class InventorySource : ISortSource, ICategoryAcceptor
     {
         static readonly string[] noCategories = new string[0];
         IMyInventory inv;
         readonly List<MyInventoryItem> buffer;
-        readonly CategoryOverrides overrides;    // shared, stable for the PB's lifetime → set once in the ctor
+        readonly CategoryOverrides overrides;    // stable for the PB's lifetime, so not rebound
         DrainMode mode;
-        ReservePool pool;                        // the reserve pool model when mode is KeepQuota; null otherwise
-        MyInventoryItem pendingItem;             // captured by VALUE on the find tick; committed by item, not index
+        ReservePool pool;
+        MyInventoryItem pendingItem;
         IMyInventory pendingTarget;
         ICategoryAcceptor pendingAcceptor;
-        MyFixedPoint? pendingAmount;             // null = whole stack; a MachineFeed / reserve-drain caps it
-        bool pendingToFront;                     // deliver at the target's slot 0 (a constrained machine feed)
+        MyFixedPoint? pendingAmount;             // null = whole stack
+        bool pendingToFront;
 
         public InventorySource(IMyInventory inventory, List<MyInventoryItem> sharedBuffer, DrainMode drainMode, ReservePool reservePool, CategoryOverrides categoryOverrides)
         {
@@ -57,15 +50,9 @@ namespace IngameScript
 
         public double AmountAt(int index) => (double)buffer[index].Amount;
 
-        // A DrainMode.All inventory drains every stack. An EvictForeign inventory keeps what its own constraint
-        // accepts and sheds only foreign items, disambiguated by per-unit volume so a manual over-fill at any
-        // level is honored and legitimate fuel/ore near 100% is never false-evicted. Eviction is a rare safety
-        // net — SE input constraints reject foreign items on every insertion path, so a present item is almost
-        // always kept; it only bites if a mod/game update drops a previously-valid type from the constraint.
-        // A KeepQuota reserve drains a quota item only when it is over target (the over-target excess routes out,
-        // capped source-side in Prepare; a Min surplus only to another pool, CanPlaceAt) and drains a non-quota item
-        // fully to its category home; a quota item at/under target — and every All item — is kept. A ToDemand stack
-        // is drainable; SortJob restricts where it may go (DemandOnly).
+        // Eviction is a rare safety net: SE input constraints reject foreign items on every insertion path, so it only
+        // bites if a mod or game update drops a type already inside from the constraint. SortJob limits where a
+        // ToDemand stack may go (DemandOnly).
         public bool ShouldDrain(int index)
         {
             if (mode == DrainMode.KeepAll) return false;
@@ -87,11 +74,9 @@ namespace IngameScript
 
         public bool IsSameAs(ICategoryAcceptor acceptor) => acceptor.Inventory == inv;
 
-        // Ask the target itself whether it will take one unit right now. Deliberately "room for ≥1 unit", not the
-        // whole stack, so a near-full higher-priority container still qualifies — Commit tops it off with what
-        // fits and the remainder spills to the next target. Cheap and network-free; reachability isn't checked.
-        // A Min quota promises the player the stock stays on reserve duty, so its surplus may top up another pool's
-        // shortfall but never go back to storage or into a machine. A refill tank only borrows a bottle.
+        // Room for one unit, not the whole stack, so a near-full higher-priority target still qualifies: Commit tops it
+        // off and the rest spills on. A Min quota's stock stays on reserve duty, so its surplus may go only to another
+        // pool's intake. A refill tank only borrows a bottle.
         public bool CanPlaceAt(int index, ICategoryAcceptor target)
         {
             Quota q;
@@ -99,12 +84,9 @@ namespace IngameScript
             return target.Accepts(buffer[index].Type);
         }
 
-        // Runs on the cheap find tick and captures the item by VALUE (its id travels in the struct), not an
-        // index — so Commit can move by id on the next tick. The move amount is the tighter of the target's cap
-        // (a MachineFeed / reserve intake stopping ON its fill target) and this source's cap (a KeepQuota reserve
-        // shedding only its over-target excess). A refill tank's lift skips the source cap and leaves the pool count
-        // alone: the sweep returns the bottles to this inventory before any other job runs, so capping it to the
-        // excess left a reserve's bottles at or under target never refilled.
+        // Captures the item by value so Commit can move it by id. A refill tank's lift skips the source cap and pool
+        // count: the sweep returns the bottles here before any other job runs, and capped to the excess, a reserve's
+        // bottles at or under target would never be refilled.
         public void Prepare(int index, ICategoryAcceptor target)
         {
             pendingItem = buffer[index];
@@ -112,20 +94,14 @@ namespace IngameScript
             pendingAcceptor = target;
             var amount = target.ClaimTransferAmount(pendingItem);
             pendingAmount = target is RefillStation ? amount : ClaimExcess(pendingItem, amount);
-            // A machine consumes its input queue front-first and greedy top-ups merge into the front stack, so a
-            // demand delivery landing behind one would never be processed while its in-flight cover suppresses
-            // re-requesting. Delivering a constrained feed's ore at slot 0 closes that live-lock inside the one
-            // conveyor call already being paid for. A concrete cast, not a seam — front placement is intrinsic to
-            // a constrained MachineFeed and has no second caller.
+            // A machine consumes its input front-first and greedy top-ups merge into the front stack, so a demand
+            // delivery behind one would never be processed while its in-flight cover suppresses re-requesting.
             var feed = target as MachineFeed;
             pendingToFront = feed != null && feed.IsConstrained;
         }
 
-        // A KeepQuota reserve moves only the over-target excess of a quota item — capped to the stack, floored to
-        // whole units, and no larger than any target-side cap. Non-quota items (and non-reserve sources) drain
-        // whole, governed by the target cap alone. Decrements the pool count so a sibling pool container sees the
-        // reduced excess this cycle (decrement-at-Prepare: a rare short commit only ever under-drains, corrected
-        // next recount).
+        // Decremented at Prepare so a sibling container sees the reduced excess this cycle; a short commit only
+        // under-drains until the next recount.
         MyFixedPoint? ClaimExcess(MyInventoryItem item, MyFixedPoint? targetAmount)
         {
             if (mode != DrainMode.KeepQuota || pool == null) return targetAmount;
@@ -142,11 +118,8 @@ namespace IngameScript
             return Roles.Amount(units, item);
         }
 
-        // The one conveyor-bound call, alone on its tick so all the sub-bar headroom is free to absorb a
-        // coincident GC pause. Moving by item id makes the cross-tick split safe: a stack that shifted, drained,
-        // or vanished since Prepare returns false and moves nothing, never a stale-index mis-move. A null amount
-        // moves the whole stack (SE moves what fits, remainder routes onward); a MachineFeed passes a computed
-        // cap so the fill stops ON its target. An unreachable target likewise just returns false.
+        // The one conveyor-bound call, alone on its tick so the headroom under the bar absorbs a coincident GC pause.
+        // Moving by item id makes the cross-tick split safe: a stack that shifted or vanished since Prepare moves nothing.
         public CommitResult Commit(bool dry)
         {
             if (pendingTarget == null) return CommitResult.ItemGone;
@@ -160,10 +133,8 @@ namespace IngameScript
             return result;
         }
 
-        // Runs only when the transfer moved nothing, so the successful commit tick stays bare. One local re-read
-        // (no conveyor) tells the three causes of a false transfer apart: the stack was taken between the find
-        // and commit ticks, the target filled meanwhile, or a genuine conveyor/sorter refusal — only the last
-        // deserves the "can't reach" warning.
+        // Only after a failed move, so a successful commit tick stays bare. One local re-read tells a stack taken or a
+        // target filled meanwhile from a genuine refusal — only the last deserves "can't reach".
         CommitResult ClassifyFailure()
         {
             buffer.Empty();
@@ -174,11 +145,8 @@ namespace IngameScript
             return CommitResult.ItemGone;
         }
 
-        // The index overload is the only one that can name a target slot, and a slot index must come from the
-        // live inventory — so re-locate the prepared item by its id in a fresh snapshot (a local read; the tick's
-        // one conveyor call stays singular). A shifted or vanished stack degrades to "no move", preserving the
-        // commit-by-id safety. stackIfPossible=false keeps the arrival its own front stack rather than trusting
-        // merge semantics near an explicit index; a second stack of the same ore is harmless.
+        // Only the index overload names a target slot, so the prepared item is re-located by id in a fresh local read.
+        // stackIfPossible=false keeps the arrival its own front stack rather than trusting merge semantics near an index.
         bool CommitToFront(bool dry)
         {
             buffer.Empty();
@@ -189,8 +157,7 @@ namespace IngameScript
             return false;
         }
 
-        // The return-target face (bottle sweep): room for one unit is the only gate. No categories/priority/
-        // demand — it is never placed in the routing index, only handed to a tank's Contents as a return target.
+        // The bottle sweep's return-target face: never in the routing index, so room for one unit is its only gate.
         public IMyInventory Inventory => inv;
         public bool Accepts(MyItemType type) => inv.CanItemsBeAdded(1, type);
         public MyFixedPoint? ClaimTransferAmount(MyInventoryItem item) => null;

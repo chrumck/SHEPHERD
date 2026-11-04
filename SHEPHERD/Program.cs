@@ -20,9 +20,7 @@ using VRageMath;
 
 namespace IngameScript
 {
-    // SHEPHERD — a server-legal inventory sorter. The Pacer-driven loop paces the SortJob to ONE transfer per tick
-    // and renders its LCD surfaces ([SHEPHERD] status, [SHEPHERD-DEBUG] profiler, [SHEPHERD-LOG] log, the
-    // [SHEPHERD-RESERVE] levels panels) one panel per tick.
+    // At most one transfer and one panel render per tick: the limiter charges a run's total.
     public partial class Program : MyGridProgram
     {
         #region mdk preserve
@@ -33,75 +31,63 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.45";
+        const string ScriptVersion = "1.0.46";
 
-        // Per-Step() work budget: each item examined AND each source finished draws it down, so one Step() does a
-        // bounded slice of the scan regardless of grid size. Higher values push on the average bar as well as
-        // shortening the idle full-scan cycle, so retune from both othr avg and othr max.
+        // Each item examined and each source finished draws it down, so one Step() is bounded whatever the grid size.
+        // Higher shortens the idle full-scan cycle but pushes on both the peak and the average bar.
         const int ExamineBudget = 100;
 
-        // Blocks classified per scan tick. The classify pass is spread across ticks (ClassifyCursor) so one scan
-        // run can't grow past the limiter's peak bar with grid size; this bounds each tick. Higher = fewer, heavier
-        // scan ticks (nearer the 0.8 ms bar), lower = more, cheaper ticks — retune from the [SHEPHERD-DEBUG] scan max.
+        // Bounds each classify tick so a scan run can't grow past the peak bar with grid size.
         const int ClassifyBudget = 200;
         const double DiscoverYieldFloor = 100.0;
         const double DiscoverYieldSample = 110.0;
 
-        // How often to re-count the grid while a cycle is in flight, and the minimum gap between two scope-trip
-        // restarts. The probe is one GetBlocksOfType (measured ~0.03 ms), so the interval is set by how long a
-        // stale scope is tolerable, not by cost; the cooldown bounds the worst case of a grid being dismantled
-        // block by block, where every probe would otherwise discard the pass that just restarted.
+        // The probe is cheap, so its interval is set by how long a stale scope is tolerable; the cooldown bounds a
+        // grid dismantled block by block, where every probe would otherwise discard the pass that just restarted.
         const double ScopeProbeSeconds = 2.0;
         const double ScopeTripCooldownSeconds = 10.0;
 
-        // A routine back-off is logged only after this long without one: on a large conveyor network transfers sit
-        // just over the peak bar every few seconds, and logging each pushed every other message out of the log.
+        // On a large conveyor network transfers sit just over the peak bar every few seconds; logging each back-off
+        // pushed every other message out of the log.
         const double BackoffLogQuietSeconds = 60.0;
         const double StartupLogSeconds = 180.0;    // how long after a start every run over the peak bar is logged
         const double RunGapLogSeconds = 5.0;       // 3x the slowest cadence's gap
-        // A start's packed run stops taking more steps past this. The first calls compile for 14–95 ms each in game,
-        // and spike pacing allows two long runs per 10.5 s, so a budget under one call gives each its own run.
+        // First calls compile for tens of ms each and spike pacing allows only two long runs per window, so a start's
+        // packed run takes steps up to this to fit several cold calls in one run.
         const double PackMs = 150.0;
-        // How long a start packs its runs and skips the breach back-off: well inside the limiter's per-PB startup
-        // allowance (about a minute from a block's first run), so the cold first calls land in it.
+        // Well inside the limiter's per-PB startup allowance (about a minute), so the cold first calls land in it.
         const double DefaultStartupSeconds = 45.0;
 
-        // Moves in one cycle that make it a backlog worth the fast cadence. Below this the moves are a trickle (a
-        // running base's harvests and refills) that the idle cadence keeps up with; even at the heaviest measured
-        // transfer (~1 ms) this many at Update10 keep the limiter's 50-run average near half its bar, while past
-        // it Update1's cheap ticks are what dilute the average.
+        // Fewer moves are a trickle the idle cadence keeps under half the limiter's average bar even at the heaviest
+        // transfers; past it, Update1's cheap ticks are what dilute the average.
         const int BacklogMoves = 8;
 
-        // A running machine's output is harvested at most this often (sim-time) unless a stack in it is wanted by a
-        // demand target: one transfer moves the whole stack, so waiting turns a move every cycle into one per interval.
+        // Unless a demand target wants the stack: one transfer moves a whole stack, so waiting turns a move every
+        // cycle into one per interval.
         const double HarvestSeconds = 15.0;
 
-
-        // The Advanced PB Limiter passes this argument (::-1 peak, ::-2 average) right before it would punish us.
+        // The limiter passes this (::-1 peak, ::-2 average) at its last offense before punishing.
         const string GracefulShutDownArg = "GracefulShutDown::";
 
         const int LogCapacity = 30;
 
-        // Every SHEPHERD PB advertises and listens on this tag, across connectors because a PB manages its docked
-        // grids too; a receiver narrows that to the PBs that would manage the same blocks (StandingBy).
+        // Across connectors because a PB manages its docked grids too; a receiver narrows that to the PBs that would
+        // manage the same blocks (StandingBy).
         const string LeadChannel = "SHEPHERD";
         const TransmissionDistance LeadRange = TransmissionDistance.ConnectedConstructs;
 
-        // The SHEPHERD-managed Custom Data sections the persistence writer owns: the category overrides
-        // and the craft tracking state (the one disassembler SHEPHERD switched, so a recompile can tell it from a
-        // user's deliberate Disassembly mode). The user's [Reserve...] sections and any comments are NOT managed —
-        // the writer re-parses and leaves them untouched (merge-not-clobber), except that saving learn mode sets the
-        // learned keys in [Reserve...] one line at a time.
+        // The sections the writer owns. [Production] holds the one disassembler SHEPHERD switched, so a recompile can
+        // tell it from a user's own Disassembly mode. The user's sections and comments are left untouched, except that
+        // a learn save sets the learned keys in [Reserve...].
         const string CategoriesSection = "Categories";
         const string ProductionSection = "Production";
         const string RecipesSection = "Recipes";
         const string YieldsSection = "Yields";
         const string DisassemblerKey = "disassembler";
-        // The user's own section: read on load like the reserve quotas. SHEPHERD only adds the keys it lacks, so
-        // every setting and its value is listed in Custom Data without a trip to the guide.
+        // The user's section; SHEPHERD only adds the keys it lacks, so every setting is listed in Custom Data.
         const string SettingsSection = "Settings";
-        // In the guide's order, which AddMissing keeps when it appends the keys a section lacks. Each rule is
-        // {low, high, default}; priority is any whole number and the three switches are true/false.
+        // In the README's order, which AddMissing keeps when it appends missing keys. Each rule is {low, high,
+        // default}; priority is any whole number and the three switches are true/false.
         static readonly string[] SettingKeys = ("utcOffsetHours,reactorFillPct,gasGenFillPct,refineryFillPct,bottleSweepMinutes,"
             + "sortPassSeconds,priority,factionShare,dockedProduction,dockedFuel,peakMs,parkSim,resumeSim,backoffSim,spikeMs,"
             + "spikeWindowSeconds,startupSeconds,statusWrapChars").Split(',');
@@ -135,10 +121,9 @@ namespace IngameScript
         // into it mid-pass would shift the list under the cursor.
         readonly List<IMyTerminalBlock> scopeBuffer = new List<IMyTerminalBlock>();
         readonly List<IMyShipConnector> connectorBuffer = new List<IMyShipConnector>();
-        // The cycle's managed scope, rebuilt at each fetch (and on each heartbeat while standing by, when no fetch runs).
+        // Rebuilt at each fetch, and on each heartbeat while standing by, when no fetch runs.
         readonly ManagedScope scope = new ManagedScope();
-        // The tripwire's fresh reading, compared against scope — never written into scope, which the in-flight
-        // classify reads.
+        // The tripwire's reading, kept apart from scope, which the in-flight classify reads.
         readonly ManagedScope probeScope = new ManagedScope();
         readonly List<MyInventoryItem> itemBuffer = new List<MyInventoryItem>();
         readonly List<ISortSource> sortSources = new List<ISortSource>();
@@ -155,12 +140,11 @@ namespace IngameScript
         // One delegate for every cycle's refinery feeds (a per-cycle method-group conversion would allocate).
         readonly Func<string, bool> openRefineryTakes;
         readonly Func<bool> full;      // the run is past half the instruction cap; every step loop yields then
-        // Unknown-yield ores yield learning is waiting on (a live deficit + a request, an under-sampled stock, or
-        // the active sample) — withheld from open greedy feeds so the sample can accumulate. Rebuilt each plan;
-        // without demand it stays empty and unknown ores (e.g. a modded processor's fuel ore) feed freely.
+        // Unknown-yield ores that yield learning waits on, withheld from open greedy feeds so the sample can build up.
+        // Empty without demand, so unknown ores (e.g. a modded processor's fuel) feed freely.
         readonly HashSet<string> sampleReservedOres = new HashSet<string>();
         readonly ProductionLedger productionLedger = new ProductionLedger();
-        readonly LedgerJob ledgerJob;    // pooled like the phase jobs: re-armed per cycle, never reallocated
+        readonly LedgerJob ledgerJob;    // pooled: re-armed per cycle, never reallocated
         readonly CraftPlanner craftPlanner = new CraftPlanner();
         readonly CraftJob craftJob = new CraftJob();
         readonly RefinePlanner refinePlanner = new RefinePlanner();
@@ -170,10 +154,12 @@ namespace IngameScript
         readonly YieldSample yieldSample = new YieldSample();
         readonly Dictionary<string, double> yieldInput = new Dictionary<string, double>();
         readonly Dictionary<string, double> yieldOutput = new Dictionary<string, double>();
-        readonly List<IRefineryFeed> refineryFeeds = new List<IRefineryFeed>();   // this cycle's refinery MachineFeeds
-        readonly Func<string, bool> ingotRoomProbe;   // the planner's route-has-room stop condition, bound once
-        readonly PhaseJob planJob;       // the one cheap production-plan tick between the ledger tally and the sort
-        readonly ProductionStatus production;  // the status LCD's production section + its transition log
+        readonly List<IRefineryFeed> refineryFeeds = new List<IRefineryFeed>();
+        readonly LevelFill[] levelFills = new LevelFill[4];   // by FeedKind, fresh each build
+        readonly Func<string, bool> ingotRoomProbe;   // bound once, so a plan allocates no delegate
+        readonly PhaseJob planJob;
+        bool planHalf;      // the plan's craft half ran; the refine half is next
+        readonly ProductionStatus production;
         readonly List<KeyValuePair<string, string>> productionEntries = new List<KeyValuePair<string, string>>();
         readonly List<KeyValuePair<string, string>> settingsEntries = new List<KeyValuePair<string, string>>();
         // Set by a reload that found keys missing. The fill uses the values that reload read, so only the flush right
@@ -182,15 +168,12 @@ namespace IngameScript
         RoutingIndex cycleRouting;       // built at the build phase, consumed when the plan tick enqueues the sort
         List<ManagedBlock> managedBlocks;
         long persistedDisassembler;      // the tracking state as last written, so a flush fires only on the edge
-        // [Settings], indexed by the constants above. A sort pass's cap trades a rescan's few seconds of phase ticks
-        // against how stale re-planning, reserve counts and a due bottle sweep get while a backlog stretches the pass.
         readonly double[] settings = new double[18];
         readonly PeerElection election = new PeerElection();
         readonly IMyBroadcastListener leadListener;
         string leader;                   // the live peer this PB stands by for; null while it does the work
-        // The dry cycle has run since compile (QueueDryRun). Until then an outranked PB keeps working instead of
-        // standing by: the first run of each path is slow (its methods compile), and paid inside the limiter's startup
-        // allowance it is free, while a stand-by would defer it to the resume — an undock, long after the allowance.
+        // Until the dry cycle has run, an outranked PB keeps working: each path's slow first run (its methods compile)
+        // is free inside the limiter's startup allowance, but a stand-by would defer it to a resume long after.
         bool warmedUp;
         bool dryFlush;          // the dry cycle's config save is due
         int dryRuns;            // dry cycles queued since compile
@@ -205,25 +188,23 @@ namespace IngameScript
         readonly MessageLog messageLog = new MessageLog(LogCapacity);
         readonly StringBuilder renderBuffer = new StringBuilder();
 
-        readonly ClassifyCursor classifyCursor = new ClassifyCursor(); // spreads the classify pass across scan ticks
-        readonly CycleDriver driver = new CycleDriver(); // the cycle's job queue: fetch → classify → build → sort → bottles
-        readonly PhaseJob fetchJob;      // the three phase jobs are pooled and re-armed per cycle, never reallocated
+        readonly ClassifyCursor classifyCursor = new ClassifyCursor();
+        readonly CycleDriver driver = new CycleDriver();
+        readonly PhaseJob fetchJob;      // the phase jobs are pooled: re-armed per cycle, never reallocated
         readonly PhaseJob classifyJob;
         readonly PhaseJob buildJob;
         List<IBottleTank> bottleTanks;
-        // Sim-time since the last completed bottle sweep → gates the next. Seeded past any interval so the FIRST
-        // sweep is due on startup (users expect bottles filled right away); reset to 0 after each sweep.
+        // Seeded past any interval so the first sweep is due on startup: users expect bottles filled right away.
         double secsSinceBottleSweep = 1e9;
         bool activelyWorking;      // true while a sweep is moving items — the health word; a clean pass clears it
         bool backlog;              // moves are queueing faster than a trickle — the only thing that earns Update1
-        // Sim-time each processor's output was last harvested, and the outputs due this cycle (sort-source index →
-        // processor id). A due output is stamped only once a sort pass has walked it, so a capped pass that never
-        // reached it leaves it due.
+        // Outputs due this cycle map sort-source index → processor id. A due output is stamped only once a sort pass
+        // has walked it, so a capped pass that never reached it leaves it due.
         readonly Dictionary<long, double> harvestedAt = new Dictionary<long, double>();
         readonly Dictionary<int, long> dueOutputs = new Dictionary<int, long>();
         RunKind lastTickKind;      // what last tick did → THIS tick's LastRunTimeMs is that kind's cost (one tick late)
-        // What last tick did beyond its kind, for the slow and throttling lines: a catch-all othr run can be a find,
-        // a bottle step, a panel or nothing at all, and only the job tells our own cold path from an outside stall.
+        // What last tick did beyond its kind, for the slow and throttling lines: only the job tells our own cold path
+        // from an outside stall in a catch-all othr run.
         string lastJob, lastPanel;
         bool lastBeat;             // last tick sent the election heartbeat
         int lastBackoffs;          // last-seen Pacer.Backoffs → a fresh breach back-off engaged
@@ -245,13 +226,11 @@ namespace IngameScript
         bool simParkLogged;        // last-seen Pacer.SimParked → log only the park/resume edges
         bool discoveryObserveTurn;
         string echoText;
-        // One StateChannel per recompute cadence (several may share one): each owns its asserted set and its memory,
-        // so a site just Begin/Add/Commits on the channel matching its recompute event and no channel prunes
-        // another's states. Every channel logs entry edges; only those in statusMessages also render.
+        // One StateChannel per recompute cadence, so no channel prunes another's states. Every channel logs entry
+        // edges; only those in statusMessages also render.
         readonly StateChannel learnStates;     // each learn sweep: the preview of what leaving the mode would save
         readonly StateChannel learnSkips;      // each learn sweep: tagged containers that don't teach, and why (log-only)
-        readonly StateChannel noRouteStates;      // sort lap: a category with no accepting container. Log-only — its
-                                                 // [SHEPHERD] category row already shows ──no route──
+        readonly StateChannel noRouteStates;   // sort lap; log-only, since the category row already shows ──no route──
         readonly StateChannel unreachableStates; // sort lap: a target that reports room but can't be reached
         readonly StateChannel bottleStates;    // recomputed when a bottle sweep completes (stranded tanks)
         readonly StateChannel reserveStates;   // recomputed each cycle's source build (reserve setup problems)
@@ -262,18 +241,15 @@ namespace IngameScript
         // The status panel's message blocks, in render order. Fixed instances filled in place by their owners, so a
         // render neither allocates nor rebuilds them.
         readonly List<List<string>> statusMessages = new List<List<string>>();
-        // Reserve pools, keyed by pool name ("" = the default/bare pool). Read once at startup + on `configReload`; the
-        // in-memory model is the source of truth (never read per cycle). Counts are reset + refilled each cycle.
+        // Keyed by pool name ("" = the bare pool). Read only at startup and on configReload, never per cycle.
         readonly Dictionary<string, ReservePool> reservePools = new Dictionary<string, ReservePool>();
-        // The category override map, read from the [Categories] Custom Data section at startup/configReload
-        // (never per cycle) and written back merge-not-clobber on change. Memory is the source of truth.
+        // Read only at startup and on configReload, never per cycle; memory is the source of truth.
         readonly CategoryOverrides categoryOverrides = new CategoryOverrides();
         // Signature of the managed sections as last read/written, so a flush that would change nothing is skipped.
         string lastFlushSignature = "";
         bool flushPending;         // a managed-section change awaiting its own Save tick
-        // Learn mode: item moving stops and each cycle reads the teaching containers instead, previewing what it
-        // would save; nothing is written until the mode is left. In memory only, so a recompile leaves the mode and
-        // drops what was not saved — the arrangement itself is still in the containers to teach again.
+        // In memory only: a recompile leaves learn mode and drops what was not saved, but the arrangement is still in
+        // the containers to teach again.
         bool learnMode;
         bool learnSaving;          // `learn` ran again: one more sweep, so the save matches the arrangement right now
         bool learnCommit;          // learned reserve lines ride the next flush, then the config reloads
@@ -292,7 +268,7 @@ namespace IngameScript
         readonly List<UnreachableRoute> lapUnreachable = new List<UnreachableRoute>();
         int movesThisCycle;
         int cycleCount;            // completed sort cycles since compile or the last statsReset
-        int renderCursor;          // rotates status→debug→log→levels LCDs so at most ONE panel is built per tick
+        int renderCursor;          // rotates the panels so at most one is built per tick
         int lastManaged, lastDest; // cached scan counts so the status readout can render every tick, not just at scan
         IMyTerminalBlock statusLcd;
         IMyTerminalBlock debugLcd;
@@ -305,17 +281,15 @@ namespace IngameScript
         readonly List<string> stockKeys = new List<string>();
         readonly List<string> stockCategories = new List<string>();
         bool stockStale;
-        // The status LCD's per-category fill readout, computed off the current scan's destinations: the built-ins,
-        // then the custom categories. The rows change only at a cycle's build (configReload restarts the cycle) and
-        // are refilled in place, so a status render allocates only the final WriteText string.
+        // The fill rows change only at a cycle's build and are refilled in place, so a status render allocates only
+        // the final WriteText string.
         List<Destination> destinations;
         readonly List<CategoryFill> categoryFills = new List<CategoryFill>();
         readonly List<string> customCategories = new List<string>();
         // The last row while any [SHEPHERD:*] container exists: the summed catch-all fill, the one figure every
         // category without its own container shares.
         readonly CategoryFill catchAllRow = new CategoryFill("catch-all");
-        // The status LCD's reserve section: one quota-fill bar per configured pool. The pool set changes only on
-        // configReload, so the entries are rebuilt there; BuildReserveFills just refills fractions per render.
+        // The pool set changes only on configReload, so the entries are rebuilt there and a render only refills them.
         readonly List<ReservePool> reserveFillPools = new List<ReservePool>();
         readonly List<CategoryFill> reserveFills = new List<CategoryFill>();       // parallel to reserveFillPools
 
@@ -351,8 +325,7 @@ namespace IngameScript
             learnJob = new PhaseJob(LearnStep, StepResult.Classified);
             leadListener = IGC.RegisterBroadcastListener(LeadChannel);
 
-            // Start eager: the cold first runs must be over within the limiter's startup grace, and a fresh start
-            // sorts promptly. The loop settles to idle after one clean pass.
+            // The cold first runs must be over within the limiter's startup allowance.
             activelyWorking = backlog = true;
             Runtime.UpdateFrequency = UpdateFrequency.Update1;
             BuildEcho(null);
@@ -370,9 +343,8 @@ namespace IngameScript
             var isTick = (updateSource & (UpdateType.Update1 | UpdateType.Update10 | UpdateType.Update100)) != 0;
             if (isTick) { Tick(); runInstructions = Runtime.CurrentInstructionCount; return; }
 
-            // Not the scheduled loop — a command, trigger, or the limiter's cooperative shutdown signal. The next
-            // tick reads THIS run's ms, so book the previous tick's sample now and charge this run to its own kind,
-            // else a command's cost lands on whatever the last tick happened to do.
+            // The next tick reads this run's ms, so book the previous tick's sample now, else a command's cost lands
+            // on whatever the last tick did.
             stats.Record(Runtime.LastRunTimeMs, lastTickKind);
             lastTickKind = RunKind.Command;
             lastJob = argument;
@@ -393,8 +365,7 @@ namespace IngameScript
                 pacer.ResetCounters();
                 lastBackoffs = 0;
                 lastEscalations = 0;
-                cycleCount = 0; // window-scope the whole [SHEPHERD-DEBUG] header, else lifetime "cycles" sits next
-                                // to a just-zeroed "uptime" and the pair reads as nonsense
+                cycleCount = 0; // else lifetime cycles beside a just-zeroed uptime reads as nonsense
                 ShowCommandResult("run stats reset");
             }
             // A bare run (a timer or button with no argument) is not a mistyped command.
@@ -405,15 +376,10 @@ namespace IngameScript
             runInstructions = Runtime.CurrentInstructionCount;
         }
 
-        // One scheduled run. The Pacer (driven by the previous run's ms) decides whether a heavy call may fire and
-        // how fast to wake next. A cycle is a job queue — fetch, then bounded classify batches (spread so no
-        // single scan run grows with grid size), then the build, batched the same way, then transfers, then the
-        // bottle sweep when due — and the CycleDriver steps ONE job per run, so no two expensive operations share a
-        // run. At most one transfer, hence at most one conveyor call, per tick.
+        // The CycleDriver steps one job per run, so no two expensive operations share a run.
         void Tick()
         {
-            // A PB can't read its own in-run time, so this is the PREVIOUS tick's cost — attribute it to what
-            // that tick did, then let the Pacer learn.
+            // A PB can't read its own in-run time, so this is the previous tick's cost.
             var lastRunMs = Runtime.LastRunTimeMs;
             var dt = Runtime.TimeSinceLastRun.TotalSeconds; // game time: under lag it under-runs the wall clock
             var now = DateTime.UtcNow;                      // by the sim ratio the limiter divides each run's ms by
@@ -434,7 +400,7 @@ namespace IngameScript
             stats.AddElapsed(dt, (f & UpdateFrequency.Update1) != 0 ? 0 : (f & UpdateFrequency.Update10) != 0 ? 1 : 2);
             gameSeconds += dt;                      // never resets (unlike the stats window) — pace deltas need it monotone
             secsSinceBottleSweep += dt;
-            lastTickKind = RunKind.Other;           // default; overridden below if this tick scans or transfers
+            lastTickKind = RunKind.Other;
 
             // The limiter checks nothing in its startup allowance, so a start's slow runs arm no back-off: it would
             // only hold back the next cold path.
@@ -458,11 +424,9 @@ namespace IngameScript
             }
             var observed = DoTickWork();
 
-            // Render only on a plain cheap tick — a heavy tick must do nothing but its call to keep headroom for a
-            // GC pause, and the plan and save ticks stay alone so their profiler rows measure only themselves. The
-            // cheap ticks render plenty. Until every panel has drawn once, though, each first render is a slow run
-            // of its own, so they all ride whatever run has room, heavy or not.
-            // A warming PB leaves the panels to a leader on its own construct.
+            // Only on a plain cheap tick: a heavy tick keeps its headroom for a GC pause, and the plan and save rows
+            // measure only themselves. Until every panel has drawn once, each first render is a slow run of its own,
+            // so they ride any run with room. A warming PB leaves the panels to a leader on its own construct.
             if (!observed && !pacer.Quiet && (leader == null || !election.LeaderOnOurConstruct)
                 && (lastTickKind == RunKind.Other || starting && !panelsDrawn && Room()))
             {
@@ -482,13 +446,11 @@ namespace IngameScript
             LogPacing(prevKind, prevJob, prevPanel, prevBeat, lastRunMs, now);
         }
 
-        // History only, never the status panel: throttling is common and expected (mostly external GC stalls the
-        // limiter drops), so it stays out of the health word too, and the full count is thr xN on the profiler.
-        // Logged: an escalation to a park, and the first back-off after a quiet spell — a steady stream of routine
-        // ones would bury every other message. prevKind + lastRunMs name the run that armed it (ArmBackoff runs only
-        // in Observe off lastRunMs). Every tick calls it, standing by too, so the counters never lag the runs.
-        // Wall time since the start, as the limiter's startup allowance counts it: a run over the peak bar in the
-        // first minutes says whether the cold runs finished inside that allowance, and which one did not.
+        // Log only, never the status panel: throttling is common (mostly GC stalls the limiter drops). Only an
+        // escalation and the first back-off after a quiet spell are logged, else routine ones bury every other
+        // message. prevKind names the run that armed it, since a back-off arms only in Observe off lastRunMs. Every
+        // tick calls it, standing by too, so the counters never lag. The wall seconds since start, as the limiter's
+        // startup allowance counts them, tell which cold run missed that allowance.
         void LogPacing(RunKind prevKind, string job, string panel, bool beat, double lastRunMs, DateTime now)
         {
             var engaged = pacer.Backoffs > lastBackoffs;
@@ -507,8 +469,7 @@ namespace IngameScript
             lastSpikes = pacer.Spikes;
         }
 
-        // Room in this run for another step or render while the start packs them: a stall the server can absorb,
-        // and far from the instruction cap, which aborts a script outright — under a quarter of it, and with room for
+        // A stall the server can absorb, and far from the instruction cap, which aborts a script outright: room for
         // twice the largest step seen, as a step's cost grows with the grid.
         bool Room() => (DateTime.UtcNow - runStart).TotalMilliseconds < PackMs && Runtime.CurrentInstructionCount < Runtime.MaxInstructionCount / 4
             && Runtime.CurrentInstructionCount + 2 * stepPeak < Runtime.MaxInstructionCount;
@@ -524,19 +485,18 @@ namespace IngameScript
         {
             try
             {
-                if (blueprintProbe.NeedsObservation && !pacer.Halted && !pacer.Throttled)
+                // Not between the plan's halves: a blueprint learned there would leave the craft half's needs stale.
+                if (blueprintProbe.NeedsObservation && !pacer.Halted && !pacer.Throttled && !planHalf)
                 {
                     discoveryObserveTurn = !discoveryObserveTurn;
                     if (discoveryObserveTurn) { lastJob = "probe"; ObserveBlueprint(); return true; }
                 }
-                // Every expensive op runs only when the Pacer allows a heavy call — so a back-off or a
-                // GracefulShutDown:: stand-down holds the scan too, not just transfers. A start's run that began
+                // A back-off or stand-down holds the scan and save too, not just transfers. A start's run that began
                 // allowed goes on past its first heavy call, the election's scope scan included.
                 if (!pacer.AllowHeavy && !(starting && heavyRun && Room())) return false;
 
-                // The rewrite re-parses and re-serializes the whole Custom Data, so it gets a tick of its own and
-                // the refractory after it, like any other allocation burst — except in a start, which the limiter
-                // doesn't check and which has first calls to pack.
+                // The rewrite re-serializes the whole Custom Data, so it gets a tick of its own and the refractory,
+                // except in a start, which the limiter doesn't check.
                 if (flushPending || dryFlush)
                 {
                     var dry = !flushPending;
@@ -567,9 +527,8 @@ namespace IngameScript
                     Measure(at);
                     lastJob = JobName(driver.LastCompleted ?? driver.Current);
                     if (driver.LastCompleted == craftJob) blueprintProbe.ProbeExecuted();
-                    // A bottle sweep keeps the fast cadence for its whole duration whatever each tick did, but never
-                    // bumps movesThisCycle — a sweep is maintenance, so EndCycle's active/idle decision stays driven
-                    // by the sort's own moves.
+                    // A sweep keeps the fast cadence throughout but never counts as moves: EndCycle's idle decision
+                    // follows the sort alone.
                     var bottleTick = driver.Current is BottleJob || driver.LastCompleted is BottleJob;
                     var sweep = (driver.LastCompleted ?? driver.Current) as BottleJob;
                     drySweep = sweep != null && sweep.Dry;
@@ -582,9 +541,8 @@ namespace IngameScript
                     }
                     else if (r == StepResult.Classified)
                     {
-                        // A classify batch, or a build step (an allocation burst over a slice of the managed blocks):
-                        // armed like a heavy call so the GC-risk window lands on a cheap tick and no two batches (nor
-                        // a batch and the first transfer) fire back-to-back.
+                        // An allocation burst, armed like a heavy call so no two batches (nor a batch and a transfer)
+                        // fire back-to-back.
                         lastTickKind = driver.Current == buildJob || driver.LastCompleted == buildJob ? RunKind.Build : RunKind.Scan;
                         pacer.NotifyHeavyFired();
                     }
@@ -601,10 +559,8 @@ namespace IngameScript
                     }
                     else if (r == StepResult.Stalled)
                     {
-                        // The conveyor call fired but moved nothing — a dead target. It cost a transfer, so attribute
-                        // it and arm the refractory like a Moved, but it is NOT progress, so leave movesThisCycle/
-                        // activelyWorking alone — a stall-only cycle parks at idle and re-probes the dead target
-                        // slowly rather than hammering it at the fast cadence.
+                        // A dead target costs a transfer but is no progress, so a stall-only cycle parks at idle
+                        // rather than hammering it at the fast cadence.
                         lastTickKind = RunKind.Transfer;
                         pacer.NotifyHeavyFired();
                     }
@@ -616,8 +572,7 @@ namespace IngameScript
                     }
                     else if (r == StepResult.Found && !bottleTick)
                     {
-                        // A transfer is queued for the next tick. Stay active but do NOT arm the refractory — find and
-                        // its commit run back-to-back; only the commit is heavy.
+                        // No refractory: find and its commit run back-to-back; only the commit is heavy.
                         activelyWorking = true;
                     }
 
@@ -631,14 +586,12 @@ namespace IngameScript
                     if (sort != null) FinishSort(sort);
                     var bottles = driver.LastCompleted as BottleJob;
                     if (bottles != null) FinishBottles(bottles);
-                    // The cycle ends when the queue drains, whichever job happened to be last — a completion handler
-                    // that enqueues a follow-up (bottles) keeps the cycle open by construction.
+                    // A completion handler that enqueues a follow-up (bottles) keeps the cycle open.
                     if (driver.LastCompleted != null && !driver.HasWork) EndCycle(dryEnd);
                 }
-                // A method compiles on its first call, so after a start every phase's first step is slow wherever it
-                // lands. Several share a run then: fewer runs over the spike bar, all inside the limiter's startup
-                // allowance. Never past a step that moved items or found a stack to move — one transfer per run —
-                // except in the dry sweep, whose moves and refills skip the engine call.
+                // A method compiles on its first call, so a start's first steps are slow; several share a run for fewer
+                // runs over the spike bar. Never past a step that found or moved items (one transfer per run), except
+                // in the dry sweep, whose moves skip the engine call.
                 while (starting && driver.HasWork && (drySweep || r != StepResult.Found && r != StepResult.Moved
                     && r != StepResult.Stalled && r != StepResult.Refilled) && Room());
 
@@ -803,9 +756,9 @@ namespace IngameScript
             into.Build(connectorBuffer, Me.CubeGrid, Me.OwnerId, On(FactionShare), On(DockedProduction), On(DockedFuel));
         }
 
-        // The election runs ahead of the tick's own heavy gate, so its scans take the gate themselves: a cold first
-        // scan inside a spike hold, or sharing a run with the first fetch, can be the third run over 10 ms that
-        // Destiny punishes. A skipped scan waits for an allowed tick; until then the PB does no work to lead with anyway.
+        // The election runs ahead of the tick's heavy gate, so its scans take the gate themselves: a cold scan inside a
+        // spike hold, or sharing a run with the first fetch, can be the third run over 10 ms that punishes. Until an
+        // allowed tick the PB has no work to lead with anyway.
         void ScanScopeAsHeavy()
         {
             if (!pacer.AllowHeavy) return;
@@ -815,13 +768,9 @@ namespace IngameScript
             pacer.NotifyHeavyFired();
         }
 
-        // Re-count the grid and its docked constructs while a cycle is in flight, and abandon the cycle if the grid
-        // shrank materially or a construct docked, undocked or was split off — so the jobs stop working from a
-        // picture that includes blocks the world no longer has (a small ship's undock is under the shrink bar, yet
-        // every transfer to it would fail), and a newly docked ship is picked up without waiting out the pass.
-        // Consumes the tick whenever it counts (one concern per tick, outside a start) and is attributed to the
-        // fetch bucket — the same calls, at the same cost. A trip drops the work but keeps discovery state, like a stand-down: those
-        // operations re-validate against every fresh scan, and a vanished machine is already their own recovery path.
+        // A construct count change trips too: a small ship's undock is under the shrink bar, yet every transfer to it
+        // would fail, and a new dock is picked up without waiting out the pass. A trip keeps discovery state, like a
+        // stand-down: those operations re-validate against every fresh scan.
         void ProbeScope()
         {
             lastScopeProbeSec = gameSeconds;
@@ -844,8 +793,8 @@ namespace IngameScript
 
         bool ClassifyPhase() => !classifyCursor.Step(ClassifyBudget);
 
-        // The cycle finalize, ClassifyBudget managed blocks per tick so its cost stays flat as the grid grows. What
-        // other ticks read between the steps (assemblers, routing, the scan's lists and LCDs) changes only on the last.
+        // Batched so its cost stays flat as the grid grows; what other ticks read between the steps changes only on
+        // the last.
         bool BuildPhase()
         {
             var scan = classifyCursor.Result;
@@ -855,6 +804,7 @@ namespace IngameScript
                 acceptors.Empty();
                 foreach (var dest in scan.Destinations) acceptors.Push(dest);
                 refineryFeeds.Empty();
+                for (var k = 0; k < 4; k++) levelFills[k] = new LevelFill();
                 ledgerKinds.Empty();
                 countPools.Empty();
                 builtAssemblers.Empty();
@@ -868,24 +818,27 @@ namespace IngameScript
             return true;
         }
 
-        // The production-plan tick: one pass running the craft planner over the freshly filled ledger, then
-        // surfacing its blocked-demand outputs, flagging a tracking change for the save tick, and enqueueing the
-        // craft actions (if any) ahead of the sort — so a planned queue mutation lands the same cycle it was decided.
+        // Craft actions go ahead of the sort, so a planned queue change lands the same cycle it was decided. Each planner
+        // walks every item key the ledger saw, so a base holding many kinds of item takes the two in separate runs, or
+        // together they pass the peak bar.
         bool PlanPhase()
         {
-            craftPlanner.Plan(productionLedger, productionFacts, ledgerJob.Snapshots,
-                blueprintProbe.ReservedAssemblerId, gameSeconds);
+            if (!planHalf)
+            {
+                craftPlanner.Plan(productionLedger, productionFacts, ledgerJob.Snapshots,
+                    blueprintProbe.ReservedAssemblerId, gameSeconds);
+                planHalf = true;
+                return false;
+            }
+            planHalf = false;
             refinePlanner.Plan(productionLedger, productionFacts, refineryFeeds, ingotRoomProbe, DiscoverYieldSample);
-            // Keep the active sample's request alive. Before ore is spent (draining/ready) the demand must still
-            // stand, so a vanished deficit cancels cheaply — but a FED sample runs to completion regardless: the
-            // ore is already committed, and its own held output counts as ledger stock, so the learn would
-            // otherwise close its reason-deficit mid-measure and abort itself with the evidence spent.
+            // Before ore is spent a vanished deficit cancels the sample cheaply, but a fed one runs to completion: its
+            // held output counts as ledger stock and would otherwise close its own deficit mid-measure.
             var sampleCommitted = yieldSample.Phase == YieldPhase.Feeding || yieldSample.Phase == YieldPhase.Measuring;
             if (yieldSample.Active && (sampleCommitted || productionLedger.RefineDeficit(yieldSample.Ingot) >= 1.0)
                 && !refinePlanner.NeedYield.Contains(yieldSample.Ore)) refinePlanner.NeedYield.Push(yieldSample.Ore);
-            // While the sample runs, its ore's blocked lines misread the in-progress learn as a failure: "no
-            // refinery" just means the OTHER refineries can't take it, and "need N to learn" fires because the
-            // delivered sample sits ledger-protected in the owned refinery's input, leaving loose stock short.
+            // While the sample runs its ore's blocked lines are false: the other refineries can't take it, and the
+            // delivered sample sits protected in the owned refinery's input, leaving loose stock short.
             if (yieldSample.Active) DropStaleYieldLines(yieldSample.Ore);
             sampleReservedOres.Empty();
             foreach (var key in refinePlanner.NeedYield) sampleReservedOres.Push(key);
@@ -919,13 +872,10 @@ namespace IngameScript
             return true;
         }
 
-        // A method compiles on its first call, and the work a grid needs may not come up for hours after a start: a
-        // ship docks, a stock runs low, bottles go empty. So the first plan after a compile queues one pass of every
-        // job that moves nothing: each routed target, gas tank and one assembler take an action of every kind with
-        // the engine call skipped, and the config save builds its text without writing it. Real work starts with the
-        // next cycle, from a fresh count, since the dry claims leave the pools' and feeds' counts off for this one.
-        // Returns whether it queued. A dry cycle cut short (a crash, a rescan) is queued once more, then given up, so a
-        // fault in it can't keep real work from ever starting.
+        // A method compiles on its first call, and the work a grid needs may come up hours after a start, past the
+        // limiter's startup allowance. So every path runs once now with the engine calls skipped. Real work starts
+        // next cycle, from a fresh count, since the dry claims leave this cycle's counts off. A dry cycle cut short is
+        // queued once more, then given up, so a fault in it can't keep real work from ever starting.
         bool QueueDryRun()
         {
             if (warmedUp) return false;
@@ -946,9 +896,8 @@ namespace IngameScript
             return true;
         }
 
-        // The refine planner's stop condition: refined ingots must have somewhere to land, or they just strand in
-        // refinery outputs. Any routed acceptor with room counts (a below-target reactor is a legitimate home).
-        // Cheap local probes on the plan tick; the cycle's feeds are still unconstrained when this runs.
+        // Ingots with nowhere to land strand in refinery outputs; any routed acceptor with room counts. The cycle's
+        // feeds are still unconstrained when this runs.
         bool IngotHasHome(string ingotKey)
         {
             if (cycleRouting == null) return false;
@@ -958,8 +907,7 @@ namespace IngameScript
             return false;
         }
 
-        // Write the tracking state only on the acquire/release edge — the flush re-parses and merge-rewrites the
-        // managed sections, so a steady plan writes nothing.
+        // Only on the acquire/release edge: a flush rewrites the whole Custom Data.
         void PersistTrackedDisassembler()
         {
             if (craftPlanner.TrackedDisassembler == persistedDisassembler) return;
@@ -1029,8 +977,7 @@ namespace IngameScript
                 DiscoverYieldSample, DiscoverYieldFloor, gameSeconds);
             if (!yieldSample.Active)
             {
-                // Tampered evidence is worthless — abandon unrecorded (never persist uncertain knowledge); the
-                // reset releases the refinery this same plan tick and the learn re-triggers while the deficit stands.
+                // Never persist uncertain knowledge; the learn re-triggers while the deficit stands.
                 Log("learn " + yieldSample.Ore + ": aborted - refinery disturbed");
                 yieldSample.Reset();
                 return;
@@ -1041,8 +988,7 @@ namespace IngameScript
             productionFacts.LearnYield(ore, learned);
             discovery.Resolve(KnowledgeKind.Yield, ore);
             yieldSample.Reset();
-            // The plan computed NeedYield/Blocked before this learn landed; drop the ore's now-stale entries so
-            // the success doesn't render one cycle of missing-yield lines for a just-learned ore.
+            // The plan computed these before the learn landed; else one cycle shows missing-yield lines for it.
             refinePlanner.NeedYield.Remove(ore);
             DropStaleYieldLines(ore);
             Log("learned yield " + ore);
@@ -1091,16 +1037,13 @@ namespace IngameScript
             return total;
         }
 
-        // Cycle phase 1: the GetBlocksOfType sweep (always-rescan) into the reused buffer, on its own tick so its
-        // cost is isolated and followed by a back-off.
         void FetchBlocks()
         {
             blockBuffer.Empty();
             GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(blockBuffer);
         }
 
-        // The build's last step: the reserve intakes after the feeds (acceptor order is the routing tie-break), the
-        // routing index, and the swap of everything other ticks read; then the ledger and plan (or the learn sweep).
+        // The reserve intakes go after the feeds: acceptor order is the routing tie-break.
         void FinishBuild(ScanResult scan)
         {
             if (sortSources.Count > builtSources) sortSources.RemoveRange(builtSources, sortSources.Count - builtSources);
@@ -1117,12 +1060,12 @@ namespace IngameScript
                 ledgerJob.Rearm(sortSources, ledgerKinds, countPools, assemblerStates);
                 stockStale = true;
                 driver.Enqueue(ledgerJob);
-                // An outranked PB plans only while warming up, to run the plan's first, slowest pass inside the
-                // limiter's startup allowance; the plan leaves its work to the leader (PlanPhase).
+                // An outranked PB plans only while warming up, so the plan's slow first pass lands in the limiter's
+                // startup allowance.
                 if (leader == null || !warmedUp)
                 {
                     planJob.Rearm();
-                    driver.Enqueue(planJob);   // the plan tick enqueues the craft actions (if any) and then the sort
+                    driver.Enqueue(planJob);   // it enqueues the craft actions and the sort
                 }
             }
             movesThisCycle = 0;
@@ -1139,8 +1082,7 @@ namespace IngameScript
             BuildBottleSweep(scan.Tanks);
         }
 
-        // Build the refill stations if a bottle sweep is due this cycle. bottleTanks stays null when no sweep is
-        // due, when disabled, or when the grid has no gas tank — FinishSort then ends the cycle normally.
+        // Null bottleTanks means no sweep this cycle, so FinishSort ends the cycle normally.
         void BuildBottleSweep(List<IMyGasTank> tanks)
         {
             bottleTanks = null;
@@ -1160,11 +1102,8 @@ namespace IngameScript
             return stations;
         }
 
-        // A sort pass ended (finished or capped): stamp the due outputs it walked, carry its resume point, commit the
-        // lap's diagnostics once every source has been visited, then queue the bottle sweep if one is armed this
-        // cycle. The sweep reuses the sort's storage sources, so it rides the same one-transfer/tick budget. (Cycle
-        // end is the scheduler's queue-drained check, not this handler's job.) A dry pass walked without harvesting
-        // anything, so it stamps nothing and keeps the rotation, but commits the lap so that code has run too.
+        // The lap's diagnostics commit only once every source has been visited. A dry pass harvested nothing, so it
+        // stamps nothing and keeps the rotation, but commits the lap so that code has run too.
         void FinishSort(SortJob job)
         {
             var n = sortSources.Count;
@@ -1177,10 +1116,8 @@ namespace IngameScript
             lapFinished += walked;
             if (lapFinished >= sortSources.Count || job.Dry)
             {
-                // Two channels because a missing route already shows on the panel as its category's ──no route──
-                // row (a routed custom category has a row too: its token is an override), so only the unreachables
-                // are shown. Those are keyed by target+category, so a container filtering only some categories
-                // reports each. Each state is forgotten once a lap stops asserting it, re-firing if it returns.
+                // Two channels because a missing route already shows as its category's ──no route── row. Unreachables
+                // are keyed by target and category, so a container filtering only some categories reports each.
                 noRouteStates.Begin();
                 unreachableStates.Begin();
                 foreach (var cat in lapNoRoute) noRouteStates.Push("no route for " + cat + " - add [SHEPHERD:" + cat + "]");
@@ -1196,7 +1133,6 @@ namespace IngameScript
             Log("refilling bottles (" + bottleTanks.Count + " tank" + (bottleTanks.Count == 1 ? "" : "s") + ")");
         }
 
-        // The sweep is done: surface any stranded tanks, restart the sweep interval — unless it was the dry one.
         void FinishBottles(BottleJob job)
         {
             LogBottleStranded(job.StrandedTanks);
@@ -1204,8 +1140,6 @@ namespace IngameScript
             if (!job.Dry) secsSinceBottleSweep = 0.0;
         }
 
-        // Log a refill tank the first time the Drain pass can't return its bottles to storage; cleared once a
-        // later sweep places them, re-fires if it recurs.
         void LogBottleStranded(List<string> current)
         {
             bottleStates.Begin();
@@ -1214,9 +1148,8 @@ namespace IngameScript
             bottleStates.Commit();
         }
 
-        // A cycle drained: only a backlog's worth of moves keeps the fast cadence for the next one (more of it may
-        // be waiting); a trickle or a clean pass settles to the idle cadence, which keeps up with a trickle.
-        // The dry cycle moves nothing either, and the real first cycle after it should run as eagerly as a start.
+        // Only a backlog keeps the fast cadence, as more may be waiting. The dry cycle moves nothing, yet the first real
+        // cycle after it should run as eagerly as a start.
         void EndCycle(bool eager)
         {
             cycleCount++;
@@ -1225,12 +1158,9 @@ namespace IngameScript
             backlog = movesThisCycle >= BacklogMoves || learnMode || eager;
         }
 
-        // The Advanced PB Limiter calls Main with GracefulShutDown:: right before it would punish us. Stand down
-        // hard: drop the in-flight sweep, hold every heavy call, and park until the offense
-        // window ages out. A fresh scan resumes after the hold clears. A stand-down is pacing, not a fault, so
-        // discovery operations survive it (their state is rebuilt into fresh feeds/drain modes every cycle) —
-        // except a probe whose queue mutation may have been dropped with the in-flight jobs; it restarts from
-        // selection.
+        // The limiter's last warning: drop the work, hold every heavy call and park until the offense window ages out.
+        // A stand-down is pacing, not a fault, so discovery survives it; its state is rebuilt into fresh feeds every
+        // cycle.
         void HandleGracefulShutDown(string argument)
         {
             pacer.StandDown();
@@ -1239,9 +1169,8 @@ namespace IngameScript
             Log("standing down (" + argument + ")");
         }
 
-        // Hear the other SHEPHERD PBs, advertise when due, and report whether a live one outranks us. Every PB
-        // advertises whatever its state, so each reaches the same verdict on its own. Entering stand-by drops the
-        // cycle and discovery: the stand-by may last indefinitely, and the leader plans from its own view.
+        // Every PB advertises whatever its state, so each reaches the same verdict on its own. Entering stand-by drops
+        // the cycle and discovery: it may last indefinitely, and the leader plans from its own view.
         bool StandingBy()
         {
             var grid = Me.CubeGrid;
@@ -1288,8 +1217,7 @@ namespace IngameScript
             return leader != null;
         }
 
-        // The full mid-cycle reset (crash / configReload): drop the work AND abandon discovery operations — a
-        // crash may have originated in one, and a reload changes the facts/quotas they were planned against.
+        // Discovery goes too: a crash may have come from it, and a reload changes the facts it was planned against.
         void ResetCycle()
         {
             ResetWork();
@@ -1298,22 +1226,18 @@ namespace IngameScript
             yieldSample.Reset();
         }
 
-        // Drop every queued and in-flight job plus any partial classify, so nothing poisoned leaks into the
-        // resumed cycle; the next allowed tick starts fresh.
         void ResetWork()
         {
-            // An abandoned pass still got somewhere: resume there. Otherwise every pass cut short (a dock or undock,
-            // a shrink, a stand-down, configReload) restarts at the same source, and the later ones are never reached.
+            // Else every pass cut short restarts at the same source, and the later ones are never reached.
             var pass = driver.Current as SortJob;
             if (pass != null) sortStart = pass.NextStart;
             driver.Clear();
+            planHalf = false;
             bottleTanks = null;
             classifyCursor.Reset();
             ResetLap();
             activelyWorking = backlog = false;
-            // A queued probe's assembler append rides the CraftJob just dropped, and nothing re-issues it: the
-            // phase only advances when that job completes, no observation runs before it does, and the planner
-            // returns early on any non-Protecting phase. It would wait forever on a queue entry never made.
+            // A queued probe's append rode the CraftJob just dropped and nothing re-issues it, so it would wait forever.
             if (blueprintProbe.Phase == BlueprintPhase.Queued) blueprintProbe.Reset();
         }
 
@@ -1324,21 +1248,17 @@ namespace IngameScript
             lapFinished = 0;
         }
 
-        // The one central log call: every diagnostic goes through here → the [SHEPHERD-LOG] rolling buffer. Keep
-        // messages short and actionable — string literals ship verbatim under minify.
+        // Keep messages short: string literals ship verbatim under minify.
         void Log(string message)
         {
             var line = Clock.HmsCentis(CurrentTime()) + " " + message;
             messageLog.Push(line);
         }
 
-        // DateTime.UtcNow (no local time zone on a server) shifted by utcOffsetHours. Read live at each use, so
-        // the status clock and the log stamps share one source. Display only — never gates a sort/pace decision.
+        // A server has no useful local time zone. Display only: never gates a decision.
         DateTime CurrentTime() => DateTime.UtcNow.AddHours(settings[UtcOffset]);
 
-        // A step threw. Never fast-loop a crashing step: drop the whole in-flight cycle (a fresh scan rebuilds
-        // next cycle), arm the breaker back-off, and log. Repeated crashes with no clean run between park us;
-        // a clean run closes the breaker.
+        // Never fast-loop a crashing step: repeated crashes with no clean run between park us.
         void HandleCrash(Exception e)
         {
             ResetCycle();
@@ -1346,9 +1266,8 @@ namespace IngameScript
             Log("step failed: " + e.Message);
         }
 
-        // Update100 is reserved for the safety parks; ordinary idle wakes at Update10 so a whole caught-up cycle
-        // completes in seconds and new work (a ship docking mid-idle) is noticed promptly — idle runs are far too
-        // cheap for the extra wakes to matter against the limiter's bars.
+        // Update100 is only for the safety parks: idle at Update10 notices new work (a ship docking) in seconds, and
+        // idle runs are too cheap for the extra wakes to matter against the limiter's bars.
         void ApplyCadence(Cadence c)
         {
             var f = c == Cadence.Working ? UpdateFrequency.Update1
@@ -1357,10 +1276,7 @@ namespace IngameScript
             if (Runtime.UpdateFrequency != f) Runtime.UpdateFrequency = f;
         }
 
-        // Parse Me.CustomData into the in-memory config: the [Reserve]/[Reserve:Name] quota pools (user-authored;
-        // only a learn-mode save writes into them) and the managed [Categories], [Production], [Recipes], and [Yields] maps. Called at startup and on the
-        // `configReload` command, never per cycle; a malformed line is logged and skipped, never thrown. Records the
-        // managed-section signature so a later FlushConfig with no model change is a no-op. Returns a short summary.
+        // Only at startup and on configReload, never per cycle; a malformed line is logged and skipped, never thrown.
         string ReloadConfig()
         {
             reservePools.Empty();
@@ -1512,12 +1428,8 @@ namespace IngameScript
             pacer.SetSpike(settings[SpikeMs], settings[SpikeWindow]);
         }
 
-        // The one writer of Me.CustomData: re-parse the live document (preserving the user's hand-authored sections
-        // and comments), rewrite only the SHEPHERD-managed sections from the in-memory model, and write back only if
-        // the managed set actually changed (dirty-gated on the signature). Its callers fire only on a change edge (a
-        // learned fact, the tracked disassembler acquired or released), because the re-parse and re-serialize scale
-        // with the whole Custom Data. A genuine parse failure aborts rather than clobbering the user's file.
-        // Dry builds the text and writes and remembers nothing.
+        // The one writer of Me.CustomData. It re-parses the live document so the user's sections and comments survive,
+        // and a parse failure aborts rather than clobbering the user's file. Dry builds the text and keeps nothing.
         void FlushConfig(bool dry)
         {
             var doc = new MyIniDocument();
@@ -1549,19 +1461,16 @@ namespace IngameScript
             lastFlushSignature = signature;
         }
 
-        // Every [Settings] key with the value in effect, in the guide's order. AddMissing writes only the keys the
-        // user left out, so what lands in Custom Data is each one's default.
+        // AddMissing writes only the keys the user left out, so what lands in Custom Data is each one's default.
         void SettingsEntries()
         {
             settingsEntries.Empty();
             for (var i = 0; i < settings.Length; i++)
-                // bool.ToString() is "False"; the guide and the parser's examples use lower case.
+                // bool.ToString() is "False"; the README uses lower case.
                 settingsEntries.Push(new KeyValuePair<string, string>(SettingKeys[i], IsSwitch(i) ? (On(i) ? "true" : "false") : settings[i].ToString()));
         }
 
-        // A [Reserve] section maps to the default pool (""), [Reserve:Name] to that named pool. The "Reserve"
-        // keyword is matched case-insensitively; the name after ':' is verbatim (it must equal the tag's pool). A
-        // section that merely shares the prefix (ReserveXYZ) is not a reserve section.
+        // The name after ':' is verbatim: it must equal the tag's pool.
         static bool TryReservePool(string section, out string pool)
         {
             pool = null;
@@ -1579,8 +1488,7 @@ namespace IngameScript
             return pool;
         }
 
-        // Rebuild the status LCD's reserve entries — one per configured pool with quotas. Called on configReload
-        // (the only time the pool set changes), so a status render just refills fractions and never allocates.
+        // Only configReload changes the pool set, so a status render just refills fractions and never allocates.
         void RebuildReserveFillEntries()
         {
             reserveFillPools.Empty();
@@ -1593,10 +1501,6 @@ namespace IngameScript
             }
         }
 
-        // One LCD panel's rendering, rotating status→debug→log→each levels LCD→each stock LCD. Its caller re-emits the
-        // Echo pane once per run (SE clears it each run, and every Echo in a run appends) — only the STABLE welcome
-        // banner, never the live profiler/log (those change every run and flash unreadably at Update1; their home is
-        // the LCDs).
         static readonly string[] Panels = { "status", "debug", "log", "levels", "stock" };
 
         void RenderTick()
@@ -1613,10 +1517,8 @@ namespace IngameScript
             renderCursor = renderCursor + 1 >= panels ? 0 : renderCursor + 1;
         }
 
-        // A stock LCD lists, for each category its tag names, every item of it held anywhere SHEPHERD manages, and for
-        // a * the contents of the catch-all containers — the ledger's stock tally, so it costs no inventory walk of its own. While a tally is half-walked the panel keeps
-        // its last frame. The keys are retaken lazily here rather than on the plan tick, which can already run long,
-        // and cost nothing on a grid without a stock LCD.
+        // Reads the ledger's stock tally, so it walks no inventory; a half-walked tally keeps the last frame. The keys
+        // are retaken here, not on the plan tick, which can already run long.
         void RenderStockLcd(Destination lcd)
         {
             if (!ledgerJob.IsDone) return;
@@ -1635,8 +1537,8 @@ namespace IngameScript
             WriteSurface(lcd.Block, renderBuffer.Length > 0 ? renderBuffer.ToString() : "name a category", true);
         }
 
-        // A levels LCD shows the one pool its tag names, the same way a reserve container joins the pool its tag
-        // names — so a bare tag means the default pool, never every pool (the status panel is the all-pools view).
+        // A bare tag means the default pool, as for a reserve container, never every pool: the status panel is the
+        // all-pools view.
         void RenderLevelsLcd(ReserveContainer lcd)
         {
             renderBuffer.Empty();
@@ -1647,12 +1549,8 @@ namespace IngameScript
             WriteSurface(lcd.Block, renderBuffer.ToString(), true);
         }
 
-        // A standing-by PB's status, debug and log panels, one per tick, drawn only while the leader is on another
-        // construct: the leader draws just its own construct's panels, so a docked ship's panels would otherwise
-        // freeze on their last frame, still reading working. Status gets a stand-by notice — no fills or production
-        // lines, which would be stale without a scan; debug and log stay themselves (this PB still runs every tick,
-        // so its run times are live; its scan counts are from before it stood by). The panels are the ones this PB's
-        // last scan found.
+        // Drawn only while the leader is on another construct: the leader draws just its own construct's panels, so a
+        // docked ship's would freeze reading working. Status shows no fills or production lines, stale without a scan.
         void RenderStandingBy()
         {
             renderCursor = renderCursor >= 2 ? 0 : renderCursor + 1;
@@ -1666,12 +1564,6 @@ namespace IngameScript
             WriteSurface(statusLcd, renderBuffer.ToString(), true);
         }
 
-        // The [SHEPHERD-DEBUG] profiler surface. Header + per-kind ms table: peak = worst single run · avg50 =
-        // rolling mean over the last 50 runs (the limiter's average-bar window, but including GC-coincident runs
-        // the limiter drops, so an upper bound) · thr xN P% = breach back-offs and their share of the window · wary
-        // xN P% = the same for the sim park's wary stage; ftch = the GetBlocksOfType sweep;
-        // scan = a classify batch; bld = a build step; xfer = the per-transfer cost; plan = the production-plan
-        // tick; save = the Custom Data rewrite; cmd = a command run; othr = the cheap Step/idle ticks.
         void RenderDebugLcd()
         {
             Profiler.Render(renderBuffer, ScriptVersion, Me.CustomName, DebugState(), CadenceLabel(), cycleCount, lastManaged, lastDest, pacer.Backoffs, pacer.BackoffTime, pacer.Waries, pacer.WaryTime, pacer.SimInstant, pacer.SimAvg, stats);
@@ -1680,14 +1572,10 @@ namespace IngameScript
 
         string DebugState() => leader != null ? "standing by" : Health(true);
 
-        // THROTTLED stays off the status panel — a breach back-off is common and expected (mostly limiter-dropped GC stalls), so it would just be noise there.
+        // A breach back-off is common (mostly GC stalls the limiter drops), so THROTTLED would be noise on the status panel.
         string Health(bool debug) =>
             pacer.Halted ? "HALTED" : learnMode ? "learning" : debug && pacer.Throttled ? "THROTTLED" : activelyWorking ? "working" : "idle";
 
-        // The wake rate currently in effect. Paired with the state word: THROTTLED U10 = a breach back-off, the sim
-        // park's wary stage (the thr/wary shares tell which), a spike hold or a stand-down; THROTTLED U100 = a full
-        // park (a second breach inside the window, the sim park); working U10 = a trickle, working U1 = a backlog,
-        // idle U10 = caught up.
         string CadenceLabel()
         {
             var f = Runtime.UpdateFrequency;
@@ -1696,8 +1584,6 @@ namespace IngameScript
                  : (f & UpdateFrequency.Update1) != 0 ? "U1" : "U0";
         }
 
-        // The [SHEPHERD-LOG] surface: rewrite only when the buffer changed, off the shared StringBuilder so a
-        // steady-state render allocates only the one WriteText string.
         void RenderLogLcd()
         {
             if (logLcd == null || !messageLog.Dirty) return;
@@ -1706,10 +1592,6 @@ namespace IngameScript
             messageLog.ClearDirty();
         }
 
-        // The [SHEPHERD] status LCD: the glanceable health view — version + health word + a clock liveness stamp
-        // + per-category fill bars, then a rule and per-reserve-pool quota-fill bars — as ONE monospace text write
-        // (not sprites). Category fills read live container volumes off the scan; reserve fills read the pools'
-        // quota model. Runtime numbers stay on DEBUG.
         void RenderStatusLcd()
         {
             PaintLights(pacer.Halted || pacer.StandingDown ? Color.Red : learnMode || NeedsReading() ? Color.Yellow : Color.Lime);
@@ -1721,9 +1603,7 @@ namespace IngameScript
             WriteSurface(statusLcd, renderBuffer.ToString(), true);
         }
 
-        // The [SHEPHERD] lights carry the status panel's verdict across a base: red when the owner must act, yellow
-        // while nothing moves on purpose or the panel lists a state line. Write-on-change, as Color syncs to every
-        // client. A PB that stops running can't paint, so its lights keep their last colour.
+        // Write-on-change, as Color syncs to every client.
         void PaintLights(Color colour)
         {
             if (lights != null)
@@ -1739,9 +1619,7 @@ namespace IngameScript
             return false;
         }
 
-        // Aggregate each category's fill across the containers that accept it: explicit acceptors if any, else a
-        // catch-all overflow marker (the figure itself is on the catch-all row), else no route. Refills the reused arrays/instances in place (zero per-render
-        // allocation). This is a coarse volume readout, not a placement decision, so no CanItemsBeAdded probe.
+        // A coarse volume readout, not a placement decision, so no CanItemsBeAdded probe.
         void BuildCategoryFills()
         {
             foreach (var f in categoryFills) { f.Cur = 0.0; f.Max = 0.0; f.Explicit = false; }
@@ -1780,9 +1658,8 @@ namespace IngameScript
             return null;
         }
 
-        // A custom category gets its own row: every token on a home destination and every [Categories] target, so
-        // one that items are routed to but no container takes shows ──no route── like a built-in. Sorted, so renaming
-        // containers never reshuffles the panel.
+        // [Categories] targets get rows too, so one that no container takes shows ──no route── like a built-in. Sorted,
+        // so renaming containers never reshuffles the panel.
         void RebuildCategoryRows()
         {
             customCategories.Empty();
@@ -1799,9 +1676,7 @@ namespace IngameScript
                     if (dest.IsCatchAll) { categoryFills.Push(catchAllRow); break; }
         }
 
-        // Refill each shown pool's quota fill (have/want; may exceed 1 when over-stocked). HasRoute=false marks a
-        // pool with no finite target (only All-mode quotas), rendered as a marker rather than a bar. Zero-alloc:
-        // the entries are fixed until configReload; only the fractions move.
+        // HasRoute=false marks a pool with only All quotas, rendered as a marker rather than a bar.
         void BuildReserveFills()
         {
             for (var i = 0; i < reserveFillPools.Count; i++)
@@ -1813,8 +1688,7 @@ namespace IngameScript
             }
         }
 
-        // Write one text blob to a block's primary text surface. Text mode, not sprites — a single WriteText is
-        // cheap and atomic, unlike a sprite DrawFrame. ContentType/Font are set write-on-change.
+        // Text, not sprites: a single WriteText is cheap and atomic, unlike a sprite DrawFrame.
         static void WriteSurface(IMyTerminalBlock block, string text, bool monospace)
         {
             var surface = block as IMyTextSurface ?? (block as IMyTextSurfaceProvider)?.GetSurface(0);
@@ -1824,11 +1698,9 @@ namespace IngameScript
             surface.WriteText(text);
         }
 
-        // Rebuild the standing Echo banner: a stable welcome + a pointer to the LCDs (or, standing by, who leads and
-        // how to take over — a stand-by PB sharing its leader's construct draws no panel, so the pane is its voice)
-        // + the command list, optionally followed by the most recent command result. Cached in echoText and
-        // re-emitted verbatim each tick, so the pane never flashes. commandResult persists until the next command or stand-by edge. The pane
-        // reads square brackets as colour markup, so none may reach it — not even inside a block or grid name.
+        // Stable, re-emitted verbatim once per run: SE clears the pane each run and every Echo appends, so live text
+        // would flash. A stand-by PB on its leader's construct draws no panel, so the pane is its voice. The pane reads
+        // square brackets as colour markup, so none may reach it, not even inside a block or grid name.
         void BuildEcho(string commandResult)
         {
             echoText = ("SHEPHERD v" + ScriptVersion
@@ -1840,24 +1712,19 @@ namespace IngameScript
                      + (commandResult != null ? "\n\n" + commandResult : "")).Replace('[', '(').Replace(']', ')');
         }
 
-        // A user ran a command: refresh the banner with its result and emit it now — this run is not a tick, so
-        // the scheduled loop won't repaint the pane until next tick.
+        // A command run is not a tick, so the loop won't repaint the pane until the next one.
         void ShowCommandResult(string result)
         {
             BuildEcho(result);
             Echo(echoText);
         }
 
-        // One managed block's share of the cycle: its machine feed, its drain sources (with their ledger kinds and
-        // count pools), and its assembler adapter.
         void BuildBlock(ManagedBlock mb)
         {
             var kind = Roles.FeedKindOf(mb.Block);
             AddFeed(mb, kind);
-            // A configured reserve keeps its loadout and sheds only over-target excess / non-quota items (KeepQuota,
-            // with its pool model); an unconfigured reserve (no quota section yet) is protected wholesale (KeepAll) so
-            // tagging a container never empties it before its quotas exist. A pool with no quota section still gets a
-            // model, so its levels LCD can list what it holds.
+            // An unconfigured reserve is kept whole, so tagging a container never empties it before its quotas exist;
+            // it still gets a pool, so its levels LCD can list what it holds.
             var pool = mb.IsReserve ? GetOrAddPool(mb.ReservePool) : null;
             var reversed = Roles.IsDisassembling(mb.Block);
             var mode = Roles.InputDrainFor(mb.Role, reversed);
@@ -1884,10 +1751,8 @@ namespace IngameScript
             if (assembler != null) builtAssemblers.Push(new AssemblerState(assembler, mb.Construct, mb.Mark, productionQueueBuffer, itemBuffer, upgradeBuffer));
         }
 
-        // A demand-first MachineFeed for a fed machine (reactor / gas generator / refinery) with a fill target above
-        // 0. Each such home machine also has its vanilla conveyor auto push/pull turned off (write-on-change) so the
-        // game stops topping it past our target; a docked one keeps the pilot's setting, which would otherwise leave
-        // with the ship. A 0% kind feeds nothing and keeps its conveyor (vanilla still supplies it).
+        // A fed home machine loses its conveyor push/pull so the game stops topping it past our target; a docked one
+        // keeps the pilot's setting, which would leave with the ship. A 0% kind keeps its conveyor.
         void AddFeed(ManagedBlock mb, FeedKind kind)
         {
             if (kind == FeedKind.None) return;
@@ -1901,12 +1766,10 @@ namespace IngameScript
             if (!mb.Docked) Roles.DisableConveyorSystem(mb.Block);
             var target = learning && (yieldSample.Phase == YieldPhase.Ready || yieldSample.Phase == YieldPhase.Feeding)
                 ? (double)(float)mb.Input.MaxVolume : pct / 100.0 * (double)(float)mb.Input.MaxVolume;
-            // A refinery's open feed must not take an ore yield learning is waiting on: greedy-feeding it
-            // burns the sample unmeasured AND holds the loose stock below the evidence floor forever (machine
-            // inputs are ledger-protected). Scoped to in-demand ores so a modded processor's unknown fuel ore
-            // still feeds with zero config when nothing is trying to learn it.
+            // Greedy-feeding an ore yield learning waits on burns the sample unmeasured and holds loose stock below
+            // the evidence floor forever, since machine inputs are ledger-protected.
             var feed = new MachineFeed(mb.Input, mb.Block.EntityId, mb.Block.CustomName, category, target,
-                kind == FeedKind.Refinery ? openRefineryTakes : null);
+                kind == FeedKind.Refinery ? openRefineryTakes : null, learning ? null : levelFills[(int)kind]);
             if (learning) yieldSample.Bind(feed);
             acceptors.Push(feed);
             if (kind == FeedKind.Refinery) refineryFeeds.Push(feed);
@@ -1923,10 +1786,7 @@ namespace IngameScript
             countPools.Push(countPool);
         }
 
-        // Add one demand-first ReserveIntake per reserve container whose pool has quotas. The intake ranks in the
-        // demand tier and self-limits on the pool's per-item deficit, counted by the ledger walk that follows. Config
-        // problems (a dual-role block, a container with no quota section, a section with no container) are collected
-        // for transition logging so the user is told rather than silently ignored.
+        // An intake self-limits on its pool's deficit, counted by the ledger walk that follows.
         void AddReserveIntakes(ScanResult scan)
         {
             reserveStates.Begin();
@@ -1962,19 +1822,16 @@ namespace IngameScript
           : kind == FeedKind.GasGen ? settings[GasGenFill]
           : settings[RefineryFill];
 
-        // A fed machine's input contents are spoken for (protected from disassembly surplus); a working refinery's
-        // input ore additionally counts as expected ingot output. Assemblers and plain storage tally as ordinary
-        // stock — their queued work is accounted from the queues themselves. A machine tagged catch-all stays a
-        // machine here: its feed protection outranks a stock-LCD readout.
+        // A fed machine's input is spoken for, so it is never disassembly surplus; a working refinery's ore also counts
+        // as incoming ingots. A machine tagged catch-all stays a machine: feed protection outranks a stock-LCD readout.
         static LedgerKind LedgerKindFor(ManagedBlock mb, FeedKind kind) =>
             kind == FeedKind.Refinery && Roles.IsOperational(mb.Block) ? LedgerKind.Refining
           : kind != FeedKind.None ? LedgerKind.Protected
           : mb.CatchAll ? LedgerKind.CatchAll : LedgerKind.Plain;
     }
 
-    // The live IIniDocument over MyIni. Trivial by design — its correctness is by inspection, while the merge
-    // logic it backs is unit-tested game-free (ConfigStore/Persist.cs). Empty or blank text parses to an empty
-    // document (MyIni rejects empty, but the first-ever write must start from a blank doc to Set into).
+    // Trivial by design: the merge logic it backs is tested game-free. Blank text parses to an empty document, since
+    // MyIni rejects it but the first write must start from a blank doc.
     public class MyIniDocument : IIniDocument
     {
         readonly MyIni ini = new MyIni();

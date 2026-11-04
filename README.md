@@ -213,7 +213,9 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `statusWrapChars` | `40` | 0–1000 | Status-panel messages longer than this break onto indented lines, so a font sized to fill the panel with its bars doesn't cut them off. `0` = never break. |
 
 **Machines.** A machine below its target pulls fuel or ore ahead of storage, refilled once it has burnt a
-quarter of the target; a refinery on a shortage you set up is filled at once. Output is collected every
+quarter of the target; a refinery on a shortage you set up is filled at once. When there isn't enough for
+every machine of a kind, the emptiest is fed first and the supply is shared, so they all sit at the same
+fraction of their targets; fuel already in a machine is never moved to another. Output is collected every
 15 s, or at once when a reserve or machine wants it. SHEPHERD turns off **Use Conveyor System** on every
 base machine it feeds and never turns it back on. On a kind set to `0` or a block tagged `[SHEPHERD-Off]`,
 switch it back on yourself and it stays on.
@@ -387,6 +389,7 @@ SHEPHERD crafts only on assemblers you tag:
 | `craft X: Main assembler off` | Turn it on. |
 | `craft X: Main assembler disassembling` | Waits for the disassembly to finish. |
 | `craft X: no assembler` | The `Main` can't make X. |
+| `learn X: no Main assembler` | Learning a blueprint needs a `[SHEPHERD-Main]` on the base itself; a docked ship's doesn't count. |
 | `disassemble X: no free assembler` | The surplus waits until the base `Main` is empty or a `Coop` is switched on. |
 | `disassemble X: …` (other reasons) | Same meaning as the `craft X: …` line with that reason. |
 

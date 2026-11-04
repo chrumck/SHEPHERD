@@ -2,16 +2,14 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // Decides whether a live peer PB outranks this one. Every PB advertises its rank on a heartbeat and remembers
-    // what it hears; because the order is total (rank, then the lower address), each PB reaches the same answer on
-    // its own — the top-ranked live PB works and every other one stands by — with no negotiation and no PB having
-    // to know the whole group. Times are game seconds, so sim lag slows every PB's clock alike and a paused game
-    // expires nobody.
+    // The order is total (rank, then the lower address), so each PB reaches the same leader on its own from the
+    // heartbeats it hears, with no negotiation. Times are game seconds, so sim lag slows every PB's clock alike and a
+    // paused game expires nobody.
     public class PeerElection
     {
         public const double LeadHeartbeatSeconds = 2.0;
-        // Several heartbeats, and still about three at the parked cadence, whose ~1.67 s wakes stretch the heartbeat
-        // interval: a peer must miss more than one wake-rounded beat before it is given up on.
+        // About three beats even at the parked cadence, whose slow wakes stretch the interval, so a peer must miss
+        // more than one wake-rounded beat before it is given up on.
         public const double LeadStaleSeconds = 10.0;
 
         class Peer
@@ -26,12 +24,12 @@ namespace IngameScript
         readonly List<long> stale = new List<long>();
         double lastSent = -LeadHeartbeatSeconds;
 
-        // Whether the current leader sits on our own construct, so it already draws the panels we would.
+        // Such a leader already draws the panels we would.
         public bool LeaderOnOurConstruct;
 
-        // Priority dominates; between equal priorities a station outranks a ship and a large grid a small one, which
-        // picks the base over a docked ship without any configuration. A halted PB does no work, so it drops below
-        // every healthy one (priority × 4 stays within ±2^34) and a healthy peer takes over; alone, it still leads.
+        // Between equal priorities a station outranks a ship and a large grid a small one, picking the base over a
+        // docked ship with no configuration. A halted PB does no work, so it drops below every healthy one
+        // (priority × 4 stays within ±2^34); alone, it still leads.
         public static long Rank(int priority, bool isStatic, bool isLarge, bool halted = false) =>
             priority * 4L + (isStatic ? 2 : 0) + (isLarge ? 1 : 0) - (halted ? 1L << 40 : 0);
 
@@ -51,7 +49,7 @@ namespace IngameScript
             return fresh;
         }
 
-        // The label of the best live peer that outranks us, or null when we lead. Forgets stale peers first.
+        // The label of the best live peer that outranks us, or null when we lead.
         public string Leader(long self, long selfRank, double now)
         {
             stale.Empty();
@@ -73,7 +71,6 @@ namespace IngameScript
             return leader;
         }
 
-        // True when a heartbeat is due, which it then counts as sent.
         public bool TakeHeartbeat(double now)
         {
             if (now - lastSent < LeadHeartbeatSeconds) return false;

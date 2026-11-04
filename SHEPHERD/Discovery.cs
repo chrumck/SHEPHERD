@@ -96,9 +96,8 @@ namespace IngameScript
         public long ReservedAssemblerId => AssemblerId != 0 ? AssemblerId : manualAssembler;
         public string Blueprint;
         public bool NeedsObservation => Phase == BlueprintPhase.Observing || Phase == BlueprintPhase.Manual;
-        // The watch needs the entry to still be there when the next observation tick looks, so ask for a batch, not
-        // a single unit a fast assembler (or the Coops pulling from it) would finish first. The watched blueprint is
-        // named so the player can tell their batch from something else left unknown on the Main.
+        // A batch, not one unit a fast assembler (or its Coops) would finish before the next observation looks. The
+        // watched blueprint is named so the player can tell their batch from something else left unknown on the Main.
         public string Status => Phase == BlueprintPhase.Manual ? "learn " + Item + (mainName == null ? ": no Main assembler"
                 : manualAssembler != 0 ? ": watching " + manualBlueprint + " on " + mainName : ": batch some on " + mainName)
             : Phase == BlueprintPhase.Queued || Phase == BlueprintPhase.Observing ? "learn " + Item + ": probing"
@@ -168,17 +167,16 @@ namespace IngameScript
                 string other;
                 var found = ProducedItem(out other);
                 if (found && other == null) { Blueprint = manualBlueprint; return BlueprintObservation.Learned; }
-                // It made one other item: the entry was something else left unknown on the Main. Noting that for the
-                // session makes it count as known; otherwise it would be picked and watched again on every look.
+                // It made one other item: the entry was something else left unknown. Remembering it for the session
+                // stops it being watched again on every look.
                 if (!found && other != "" && other != null) facts.Remember(other, manualBlueprint);
                 assembler.QueueInto(queue);
                 if (other != null || Queued(queue, manualBlueprint) <= 0) ClearManualWatch();
                 return BlueprintObservation.None;
             }
 
-            // Only the home Main: any other assembler may be one that can't make the item at all (a survival kit), and
-            // a queue left on it would be watched for nothing. SHEPHERD queues its own work on the Main too, so the
-            // queue need not be alone — only the one blueprint SHEPHERD doesn't know can be attributed.
+            // Only the home Main: another assembler may be unable to make the item at all (a survival kit). SHEPHERD's
+            // own work may share the queue, so only a lone unknown blueprint can be attributed.
             IAssemblerState main = null;
             foreach (var a in assemblers) if (IsHomeMain(a)) main = a;
             mainName = main?.Name;
@@ -379,16 +377,10 @@ namespace IngameScript
 
         public double Delivered => request == null ? 0.0 : request.Delivered;
 
-        // The measurement is only trustworthy if the owned refinery went untouched, so every fed/measuring
-        // observation is checked against three tamper signals before the numbers are used: consumed
-        // (= Delivered − ore left) may never FALL (a fall means ore was inserted); it may not RISE across an
-        // interval the refinery was off at both ends (an off refinery consumes nothing — a rise is theft); and it
-        // may not rise faster than a generous multiple of the fastest pace this sample has shown (a refinery's
-        // pace is near-constant, a manual/automated grab is an instantaneous step). Output may never fall (it is
-        // harvest-protected — only an external hand can lower it). Any trip poisons the sample: the caller
-        // abandons it unrecorded and a fresh learn re-triggers while the deficit stands. Honest limit: the first
-        // two pace observations establish the baseline, so startup ramp-up cannot read as a grab. A grab before
-        // that baseline is established slips under the rate guard (the exact checks still apply).
+        // Tampering poisons the sample (abandoned unrecorded): consumed falling (ore inserted), rising while the
+        // refinery was off at both ends (theft), or rising far faster than the fastest pace seen (a refinery's pace
+        // is near-constant, a grab is a step); or output falling (it is harvest-protected). The first two pace
+        // readings set the baseline, so a startup ramp can't read as a grab, and a grab then slips past the rate guard.
         void Watch(bool working, double consumed, Dictionary<string, double> outputs, double nowSeconds)
         {
             var outputTotal = 0.0;

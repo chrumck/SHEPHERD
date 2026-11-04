@@ -10,11 +10,10 @@ namespace IngameScript
         IEnumerable<string> AcceptedCategories { get; }
         bool IsCatchAll { get; }
         int Priority { get; }
-        // The backing block's display name — diagnostics only, never consulted on the routing hot path.
+        // Diagnostics only, never read on the routing hot path.
         string Name { get; }
-        // A target expressing active demand (a below-target machine to be fed) rather than passive storage.
-        // Demand acceptors route ahead of every container and are the only targets allowed to pull a stack
-        // already sitting in an accepting container. A plain container is always false; a MachineFeed is true.
+        // Active demand (a below-target machine): routes ahead of every container, and is the only target allowed to
+        // pull a stack already sitting in an accepting container.
         bool IsDemand { get; }
         IMyInventory Inventory { get; }
         bool Accepts(MyItemType type);
@@ -24,17 +23,15 @@ namespace IngameScript
         void CompleteTransfer(double amount, bool moved);
     }
 
-    // Built once per scan from the scan-ordered acceptor list; turns the naive per-item O(all containers)
-    // routing into O(matching containers). Route() ranks the demand tier above the explicit-acceptor tier
-    // above the catch-all tier, ordering within each tier by Priority descending then scan order.
+    // Built once per scan so routing a stack costs O(matching containers), not O(all containers).
     public class RoutingIndex
     {
         readonly Dictionary<string, List<ICategoryAcceptor>> byCategory = new Dictionary<string, List<ICategoryAcceptor>>();
         readonly List<ICategoryAcceptor> catchAll = new List<ICategoryAcceptor>();
         readonly Dictionary<ICategoryAcceptor, int> scanIndex = new Dictionary<ICategoryAcceptor, int>();
-        // Route() is asked once per stack examined, and building a route allocates and sorts three tiers, so each
-        // (category, built-in) pair is built once. Tiers and priorities hold for the index's life except a
-        // constrained refinery feed's priority, which the plan tick raises — so it calls Forget() afterwards.
+        // Route() is asked per stack examined and a build allocates and sorts three tiers, so each pair is built once.
+        // Priorities hold for the index's life except a constrained refinery feed's, which the plan tick raises and
+        // then calls Forget().
         readonly Dictionary<string, Dictionary<string, List<ICategoryAcceptor>>> routes = new Dictionary<string, Dictionary<string, List<ICategoryAcceptor>>>();
         readonly TierOrder order;
 
@@ -69,10 +66,9 @@ namespace IngameScript
             }
         }
 
-        // builtIn is the item's built-in category. A machine registers under its kind's built-in feed category, so
-        // when an override moves an item elsewhere (Ore/Ice=Ice) its demand acceptors are borrowed from there —
-        // else recategorizing a fuel would starve every machine that burns it. Only the demand tier borrows: the
-        // item's storage stays its own category's. The returned list is shared by every caller: read it, never change it.
+        // A machine registers under its kind's built-in feed category, so an overridden item (Ore/Ice=Ice) borrows the
+        // demand acceptors of builtIn — else recategorizing a fuel would starve its machines. Storage is never
+        // borrowed. The returned list is shared by every caller: never change it.
         public List<ICategoryAcceptor> Route(string category, string builtIn = null)
         {
             Dictionary<string, List<ICategoryAcceptor>> byBuiltIn;
@@ -120,14 +116,12 @@ namespace IngameScript
                 && !(!string.IsNullOrEmpty(category) && byCategory.Get(category, out named) && named.Contains(acceptor));
         }
 
-        // Whether the category has a destination of its own (or a catch-all) — borrowed machine demand is not one:
-        // once the machines fill, the rest would strand, so the sort still reports the category as having no route.
+        // Borrowed machine demand is no home: once the machines fill, the rest would strand, so it stays "no route".
         public bool HasHome(string category) =>
             catchAll.Count > 0 || !string.IsNullOrEmpty(category) && byCategory.ContainsKey(category);
 
-        // Orders one tier by Priority desc, then scan index asc. The scan-index tiebreaker makes the ordering
-        // total, so equal-priority acceptors keep scan order despite List.Sort being unstable. IComparer<T>,
-        // never Comparison<T> — the latter is off the PB whitelist.
+        // The scan-index tiebreak makes the order total, since List.Sort is unstable. IComparer<T>, because
+        // Comparison<T> is off the PB whitelist.
         class TierOrder : IComparer<ICategoryAcceptor>
         {
             readonly Dictionary<ICategoryAcceptor, int> scanIndex;

@@ -11,8 +11,9 @@ namespace SHEPHERD.Tests
         const double Tick = 1.0 / 60.0; // one Update1 tick of sim-time
         const double HealthySim = 1.0;  // comfortably above every sim threshold
         const double LaggedSim = 0.6;   // below the park bar — the limiter's enforcement window is near
-        const int WindowTicks = 3;      // Update1 ticks per sim sample window
-        const double Window = WindowTicks * Tick;
+        const double Window = 0.2;      // a sim sample's wall time
+        // Update1 ticks at a lagged sim until their wall time closes a window — fewer than a game-time window would take.
+        static readonly int LaggedTicks = (int)System.Math.Floor(Window * LaggedSim / Tick) + 1;
         const double Breach = Pacer.DefaultPeakMs + 0.1; // a run over the peak bar at full speed
 
         // The tests speak sim ratios; the Pacer takes the wall time the interval took.
@@ -799,13 +800,13 @@ namespace SHEPHERD.Tests
             Assert.Equal(0, p.Backoffs);
         }
 
-        // Healthy ticks and one that took ~1.8 ticks of wall time — one slow server tick at a healthy sim.
-        const double SlowTickSim = 0.55;
+        // Nine healthy ticks, then one server tick that took 60 ms of wall time where 16.7 were due.
+        const double SlowTickWall = 0.06;
 
         static void WindowWithOneSlowTick(Pacer p)
         {
-            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, HealthySim);
-            Observe(p, 0.0, Tick, true, SlowTickSim);
+            for (var i = 0; i < 9; i++) Observe(p, 0.0, Tick, true, HealthySim);
+            p.Observe(0.0, Tick, true, SlowTickWall, false);
         }
 
         [Fact]
@@ -815,7 +816,7 @@ namespace SHEPHERD.Tests
             for (var i = 0; i < Pacer.ParkDips; i++) WindowWithOneSlowTick(p);
             Assert.False(p.SimWary);
             Assert.False(p.SimParked);
-            Assert.Equal(WindowTicks / (WindowTicks - 1 + 1 / SlowTickSim), p.SimInstant, 6);
+            Assert.Equal(10 * Tick / (9 * Tick + SlowTickWall), p.SimInstant, 6);
             Assert.Equal(0, p.Waries);
         }
 
@@ -823,7 +824,7 @@ namespace SHEPHERD.Tests
         public void ASampleWaitsForAFullWindow()
         {
             var p = new Pacer();
-            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < LaggedTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(1.0, p.SimInstant, 6);              // one tick short is not a window yet
             Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(LaggedSim, p.SimInstant, 6);
@@ -833,9 +834,9 @@ namespace SHEPHERD.Tests
         public void SustainedLagAtUpdate1GoesWaryThenParksWithinAFewWindows()
         {
             var p = new Pacer();
-            for (var i = 0; i < WindowTicks * Pacer.WaryDips; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < LaggedTicks * Pacer.WaryDips; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.True(p.SimWary);
-            for (var i = 0; i < WindowTicks * (Pacer.ParkDips - Pacer.WaryDips); i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < LaggedTicks * (Pacer.ParkDips - Pacer.WaryDips); i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.True(p.SimParked);
         }
 
@@ -856,11 +857,11 @@ namespace SHEPHERD.Tests
         public void APauseInsideAWindowDropsTheWholeWindow()
         {
             var p = new Pacer();
-            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < LaggedTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Observe(p, 0.0, Tick, true, PausedSim);         // the partial window goes with it
             Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(1.0, p.SimInstant, 6);              // carried over, these ticks would have closed a window
-            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < LaggedTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(LaggedSim, p.SimInstant, 6);
         }
 
@@ -893,7 +894,7 @@ namespace SHEPHERD.Tests
         public void AClockRunningBackwardsDropsTheWindow()
         {
             var p = new Pacer();
-            for (var i = 0; i < WindowTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
+            for (var i = 0; i < LaggedTicks - 1; i++) Observe(p, 0.0, Tick, true, LaggedSim);
             p.Observe(0.0, Tick, true, -1.0, false);
             Observe(p, 0.0, Tick, true, LaggedSim);
             Assert.Equal(1.0, p.SimInstant, 6);

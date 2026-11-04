@@ -3,25 +3,8 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // The SHEPHERD-relevant meaning decoded from a block name. Grammar:
-    //   [SHEPHERD]         -> status LCD          (IsStatusLcd); on a light, the status light
-    //   [SHEPHERD-DEBUG]   -> profiler LCD        (IsDebugLcd)
-    //   [SHEPHERD-LOG]     -> message log LCD (IsLogLcd)
-    //   [SHEPHERD:A,B]     -> accepts categories  (IsDestination, Categories); on a block without an inventory, a
-    //                         stock LCD listing those categories' items
-    //   [SHEPHERD:*]       -> catch-all overflow  (IsDestination, IsCatchAll)
-    //   [SHEPHERD:A,B:#5]  -> trailing :#N sets container-wide fill Priority (default 0, higher fills first, negatives ok)
-    //   [SHEPHERD-Off]     -> excluded            (IsOff)
-    //   [SHEPHERD-Split]   -> graph cut           (IsSplit)
-    //   [SHEPHERD-Main]    -> the assembler SHEPHERD queues on (IsMain)
-    //   [SHEPHERD-Coop]    -> an assembler that helps the Main (IsCoop)
-    //   [SHEPHERD-RESERVE]      -> reserve container, default pool (IsReserve, ReservePool="")
-    //   [SHEPHERD-RESERVE:Name] -> reserve container, named pool   (IsReserve, ReservePool="Name")
-    // The three LCD tokens are distinguished by the character right after SHEPHERD: bare [SHEPHERD] is the status
-    // LCD, [SHEPHERD-DEBUG]/[SHEPHERD-LOG] name their own surfaces — never confused, and the -DEBUG/-LOG words
-    // match case-insensitively like -Off/-Split. Category tokens are raw here; validating them against the known
-    // set is Category/Routing's job. The RESERVE pool name is kept verbatim (case + spacing) — it must match the
-    // Custom Data quota section name exactly, so only the RESERVE keyword itself is case-folded.
+    // Category tokens stay raw: validating them is Category/Routing's job. A RESERVE pool name stays verbatim, since
+    // it must match its Custom Data section name exactly.
     public class TagInfo
     {
         public bool HasTag;
@@ -44,9 +27,7 @@ namespace IngameScript
     {
         const string Keyword = "SHEPHERD";
 
-        // Shared read-only result for the majority of blocks that carry no bracket tag, so the per-cycle scan
-        // doesn't allocate a throwaway TagInfo+List per block. Safe to share: callers only READ, and an untagged one
-        // is never stored.
+        // Shared by every untagged block so the scan allocates nothing for them; callers only read it.
         public static readonly TagInfo None = new TagInfo();
 
         public static TagInfo Parse(string blockName)
@@ -121,8 +102,7 @@ namespace IngameScript
                 }
                 else if (scope.StartsAnyCase("RESERVE"))
                 {
-                    // A trailing ':' peels the pool name (verbatim); nothing after RESERVE = the default pool.
-                    // Any other suffix (RESERVED, RESERVEX) is a prefix collision, not a reserve tag.
+                    // Any suffix but ':' (RESERVED, RESERVEX) is a prefix collision, not a reserve tag.
                     var after = scope.Cut("RESERVE".Length);
                     if (after.Length == 0)
                     {
@@ -142,9 +122,8 @@ namespace IngameScript
 
         static void ParsePayload(TagInfo info, string payload)
         {
-            // The optional container-wide priority is the final ':'-delimited segment; it detaches cleanly
-            // because category tokens never contain ':'. A trailing segment that isn't a valid #N is left as a
-            // category token (priority stays 0).
+            // Category tokens never contain ':', so a final ":#N" detaches cleanly; a final segment that isn't #N
+            // stays a category token.
             var lastColon = payload.LastIndexOf(':');
             if (lastColon >= 0)
             {

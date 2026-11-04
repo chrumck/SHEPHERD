@@ -73,8 +73,7 @@ namespace IngameScript
             return s > 0 ? s : 0;
         }
 
-        // Queued work the targets no longer need: assembly past the shortfall, or disassembly past the surplus — what
-        // a docked ship's unload or a hand top-off leaves behind.
+        // Queued work the targets no longer need, as a docked ship's unload or a hand top-off leaves behind.
         public double QueuedExcess(string key, bool disassembly)
         {
             Entry e;
@@ -83,9 +82,8 @@ namespace IngameScript
             return (disassembly ? e.Outgoing : e.Incoming) - (need > 0 ? need : 0);
         }
 
-        // What the sort could actually move into a machine: grid-wide stock minus machine-input contents
-        // (Protected — the drain keeps them) and reserve-quota targets (Retained — reserve demand outranks
-        // production consumption, and a keep-quota drain refuses them anyway).
+        // Machine inputs (the drain keeps them) and reserve targets (reserve demand outranks production, and a
+        // keep-quota drain refuses them) can't be moved into a machine.
         public double Available(string key)
         {
             Entry e;
@@ -134,17 +132,10 @@ namespace IngameScript
             return e;
         }
 
-        // Each direction nets out only its OWN queued work: deficits subtract Incoming, the surplus subtracts
-        // Outgoing. Deliberately NOT the opposite queue: counting Outgoing here would sit an item being
-        // disassembled at exactly deficit 0, where any transient stock undercount (a unit consumed before its
-        // queue entry decrements, a staged stack in conveyor transit between two walk slices) reads as a positive
-        // deficit and triggers a spurious counter-assembly. A deficit that coexists with a standing disassembly
-        // queue is real but not actionable — the planner holds that direction until the opposite queue clears
-        // (else the two orders feed each other: fresh assembly output is exactly what the stale disassembly
-        // queue is waiting to shred).
-        // Machine-held stock (Protected) cannot satisfy a quota: a fed machine's contents are drain-protected, so
-        // the Move tier can never carry them to a reserve — counting them left the reserve permanently short by
-        // whatever the machine absorbed. Only movable stock nets the floor, matching Available/DisassemblySurplus.
+        // Each direction nets only its own queue: counting Outgoing here would hold an item being disassembled at
+        // deficit 0, where any transient undercount (a unit consumed before its queue entry drops, a stack in
+        // conveyor transit) triggers a spurious counter-assembly. Machine-held stock never nets the floor: the
+        // drain protects it, so it can never be carried to a reserve.
         static double Deficit(Entry e)
         {
             var d = Need(e) - e.Incoming;
@@ -161,24 +152,19 @@ namespace IngameScript
             && key.Starts(type);
     }
 
-    // How the ledger's stock walk treats one sort source. CatchAll = a catch-all container, plain stock also tallied
-    // as Caught for the stock LCDs; Protected = a fed machine's input (its contents are spoken for, never disassembly
-    // surplus); Refining = a refinery's input (protected, and its ore additionally counts as expected ingot output via
-    // known yields). Ordered: everything below Protected is plain stock.
+    // CatchAll is plain stock also tallied as Caught for the stock LCDs; a Refining input's ore also counts as
+    // incoming ingots. Ordered: everything below Protected is plain stock.
     public enum LedgerKind { Plain, CatchAll, Protected, Refining }
 
-    // One live assembler-queue entry, game-free: the blueprint subtype and its queued unit count.
     public struct QueueEntry
     {
         public string Blueprint;
         public double Amount;
     }
 
-    // The assembler view the ledger walk and the craft planner/stepper share, behind an interface so both stay
-    // game-free (live: AssemblerState over IMyAssembler; tests: a mock). QueueInto clears `into` and fills it with
-    // the current queue; CanUse is the local blueprint-compatibility probe; Append, Trim, SetDisassembling and
-    // ClearQueue are the mutations the craft stepper fires (at most one per tick). Model is the block subtype —
-    // assemblers of one model accept the same blueprints; Speed is relative to a vanilla assembler's 1.
+    // An interface so the ledger walk and the craft planner stay game-free. The craft stepper fires at most one
+    // mutation per tick. Assemblers of one Model accept the same blueprints; Speed is relative to a vanilla
+    // assembler's 1.
     public interface IAssemblerState : IMarkedAssembler
     {
         string Model { get; }
@@ -203,20 +189,16 @@ namespace IngameScript
         public double Speed;
     }
 
-    // The ledger-ingestion cycle phase — the ProductionLedger's runtime feeder. One bounded slice per Step (the
-    // SortJob budget discipline): walk every sort source's snapshot for grid-wide stock (a refinery input adding
-    // expected output, a fed input adding protection), then one assembler per budget unit for queue attribution,
-    // then every pool's quotas. A reserve container's stacks are also tallied into its pool here, so the pool's count
-    // costs no read of its own. All reads are local (GetItems/GetQueue) — no conveyor call, so the scheduler
-    // treats its ticks as cheap and never arms the heavy refractory. Pooled: Rearm per cycle, never reallocated.
+    // A reserve container's stacks are tallied into its pool here, so the pool's count costs no read of its own. All
+    // reads are local (no conveyor call), so the scheduler treats its ticks as cheap.
     public class LedgerJob : IStepJob
     {
         readonly ProductionLedger ledger;
         readonly ProductionFacts facts;
         readonly Dictionary<string, ReservePool> pools;
         readonly int examineBudget;
-        // Set by Program: the run has passed half the instruction cap. A unit's cost grows with the grid, and the cap
-        // stops the script outright, so a step yields then too.
+        // True once the run passes half the instruction cap: a unit's cost grows with the grid, and the cap aborts
+        // the script outright.
         public Func<bool> Full = () => false;
         readonly List<QueueEntry> queueScratch = new List<QueueEntry>();
         public readonly List<AssemblerSnapshot> Snapshots = new List<AssemblerSnapshot>();
@@ -264,9 +246,8 @@ namespace IngameScript
                 var src = sources[sourceCursor];
                 if (src == null) { NextSource(); continue; }
 
-                // Re-snapshot each step (the shared buffer belongs to whichever source was walked last tick). The
-                // walk is read-only, so a stack that shifted between ticks at worst miscounts one cycle — the
-                // per-cycle re-plan and the deficit deadband absorb that.
+                // Re-snapshot each step: the shared buffer belongs to whichever source was walked last tick. A stack
+                // that shifted between ticks miscounts one cycle at worst.
                 src.Refresh();
                 var kind = kinds[sourceCursor];
                 var pool = countPools[sourceCursor];
@@ -280,7 +261,7 @@ namespace IngameScript
                     examined++;
                 }
                 NextSource();
-                examined++;         // charge the snapshot itself, like the sort walk
+                examined++;         // charge the snapshot itself
                 if (examined >= examineBudget || Full()) return StepResult.Scanned;
             }
 
@@ -321,10 +302,9 @@ namespace IngameScript
             foreach (var y in outputs) ledger.AddIncoming(y.Output, amount * y.Ratio);
         }
 
-        // An Assembly-mode queue is incoming stock, a Disassembly-mode queue outgoing. Attribution goes through
-        // the facts' reverse map; an unknown modded blueprint lands on a phantom key no quota references. A
-        // switched-off assembler's assembly queue is not incoming — it would hold the deficit at zero while nothing
-        // gets made — but its disassembly queue still counts, so the same surplus is never queued a second time.
+        // An unknown modded blueprint lands on a phantom key no quota references. A switched-off assembler's assembly
+        // queue isn't incoming (it would hold the deficit at zero while nothing gets made), but its disassembly queue
+        // still counts, so a surplus is never queued twice.
         void TallyAssembler(IAssemblerState assembler)
         {
             assembler.QueueInto(queueScratch);

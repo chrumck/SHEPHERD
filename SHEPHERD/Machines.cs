@@ -8,25 +8,16 @@ using VRage.Game.ModAPI.Ingame;
 
 namespace IngameScript
 {
-    // How the sort step treats a managed block. A role is derived purely from the block's ingame interface — no
-    // tag, no config — so a modded machine that subtypes a vanilla one inherits the right behavior with zero
-    // setup, while an untyped modded machine falls back to Storage ([SHEPHERD-Off] is the escape hatch).
     public enum Role
     {
-        Storage,    // cargo/cockpit/connector/sorter/generic: drained into destinations
-        Collector,  // drill/grinder/collector: pure source, drained to storage (its contents are yield/loot)
-        Consumer,   // reactor / O2-H2 gen / irrigation system: filled with fuel, not drained (foreign items evicted)
-        Processor   // refinery / assembler: input fed & not scattered, output harvested to storage
+        Storage,
+        Collector,
+        Consumer,
+        Processor
     }
 
-    // A managed block paired with its role and inventories. Input is GetInventory(0) — the block's sort/fuel/feed
-    // inventory; Output is GetInventory(1) for a Processor (the harvested output side), null for every other role.
-    // ReservePool names the pool of a [SHEPHERD-RESERVE...] container ("" = the default pool); null = not a reserve —
-    // so the caller can resolve the container's pool model and assign it a keep-quota drain mode. Construct is the
-    // managed-scope index; Docked = on a grid docked to the PB's own construct, whose settings must leave with it
-    // unchanged. Mark is the block's assembler tag.
-    // A struct, not a class: an immutable data holder stored in a List<ManagedBlock> the always-rescan rebuilds every
-    // cycle, so value semantics keep that rebuild from heap-allocating one object per managed block.
+    // Output is a Processor's GetInventory(1), else null. ReservePool: "" = the default pool, null = not a reserve.
+    // A struct: the always-rescan rebuilds this list every cycle, and value semantics keep that from allocating per block.
     public struct ManagedBlock
     {
         public IMyTerminalBlock Block;
@@ -42,40 +33,28 @@ namespace IngameScript
         public bool Docked => Construct > 0;
     }
 
-    // Which machines the sort keeps fed, and with what. Finer than Role: both a reactor and an O2/H2 generator
-    // are Consumers but want different feed categories, and among Processors only a refinery is fed here (an
-    // assembler is fed elsewhere). None = not machine-fed.
     public enum FeedKind { None, Reactor, GasGen, Refinery }
 
-    // How much of a managed inventory the sort may drain out. All = every stack leaves for its destination.
-    // EvictForeign = keep what the block legitimately holds (a Consumer's fuel / a Processor's feed-input) and
-    // drain only foreign items — anything the inventory's own constraint rejects. KeepAll = drain nothing (a
-    // reserve container whose pool has no quota section yet, so tagging it never empties it). KeepQuota = a
-    // configured reserve: keep each quota item up to its target, drain only the over-target excess, and drain
-    // non-quota items to their category home. ToDemand = drain a stack only into a demand target (a machine feed or
-    // a reserve deficit) and otherwise leave it where it is.
+    // EvictForeign drains only what the block's own constraint rejects. KeepAll drains nothing (an unconfigured
+    // reserve, so tagging it never empties it). KeepQuota drains a quota item's over-target excess and every non-quota
+    // item. ToDemand drains a stack only into a demand target (a machine feed or a reserve deficit).
     public enum DrainMode { All, EvictForeign, KeepAll, KeepQuota, ToDemand }
 
     public static class Roles
     {
-        // A Consumer keeps its fuel and a Processor keeps its feed-input, so both only surrender foreign items;
-        // Storage and Collector drain fully. (A Processor's output inventory is a separate ManagedBlock.Output
-        // source, assigned via OutputDrainFor by the caller — not routed through here.)
         public static DrainMode DrainModeFor(Role role) =>
             role == Role.Consumer || role == Role.Processor ? DrainMode.EvictForeign : DrainMode.All;
 
-        // A DISASSEMBLING assembler runs its inventories in reverse: the output (1) holds the items being taken
-        // apart (the block pulls them itself via conveyor — never scatter them back to storage) and the input (0)
-        // holds the produced materials (harvest fully; in assembly mode that same inventory is protected feed).
+        // A disassembling assembler runs its inventories in reverse: the output holds the items being taken apart
+        // (it pulls them itself — never scatter them) and the input holds the produced materials.
         public static DrainMode InputDrainFor(Role role, bool disassembling) =>
             disassembling ? DrainMode.All : DrainModeFor(role);
 
         public static DrainMode OutputDrainFor(bool disassembling) =>
             disassembling ? DrainMode.KeepAll : DrainMode.All;
 
-        // A machine switched off or damaged past working waits for the player, so it is given no feed and no
-        // queue work. Power is deliberately left out: a brownout passes on its own, and work moved elsewhere
-        // meanwhile would then be done twice.
+        // Power is deliberately left out: a brownout passes on its own, and work moved elsewhere meanwhile would then
+        // be done twice.
         public static bool IsOperational(IMyTerminalBlock block) =>
             block.IsFunctional && (block as IMyFunctionalBlock)?.Enabled != false;
 
@@ -85,9 +64,8 @@ namespace IngameScript
             return assembler != null && assembler.Mode == MyAssemblerMode.Disassembly;
         }
 
-        // Keyed on the ingame interfaces. Everything unmatched (cargo, cockpit, connector, sorter, an untyped
-        // modded machine) falls back to Storage. Most modded machines subtype a vanilla block and so match here.
-        // The ice-fed Irrigation System implements IMyGasGenerator, so it lands in Consumer with no special case.
+        // Keyed on ingame interfaces, so a modded machine subtyping a vanilla one needs no setup; an untyped one falls
+        // back to Storage. The ice-fed Irrigation System is an IMyGasGenerator.
         public static Role Of(IMyTerminalBlock block)
         {
             if (block is IMyRefinery || block is IMyAssembler) return Role.Processor;
@@ -96,8 +74,7 @@ namespace IngameScript
             return Role.Storage;
         }
 
-        // Which machines get topped up, keyed on the same ingame interfaces as Of. Assemblers are Processors but
-        // return None — they are fed elsewhere, not by this basic feed.
+        // Assemblers return None: they pull their own ingredients.
         public static FeedKind FeedKindOf(IMyTerminalBlock block)
         {
             if (block is IMyReactor) return FeedKind.Reactor;
@@ -106,9 +83,7 @@ namespace IngameScript
             return FeedKind.None;
         }
 
-        // The feed category per kind: reactors burn Ingots (uranium and modded fusion fuels alike — the block's
-        // own CanItemsBeAdded constraint decides which, so no per-fuel table); O2/H2 generators and refineries
-        // take Ores. None → null (not fed).
+        // The block's own constraint picks the fuel within the category, so modded fuels need no table.
         public static string FeedCategoryFor(FeedKind kind)
         {
             if (kind == FeedKind.Reactor) return Categories.Ingots;
@@ -116,10 +91,8 @@ namespace IngameScript
             return null;
         }
 
-        // Turn off a fed machine's vanilla conveyor auto push/pull so its input stops refilling past our fill
-        // target and fighting the feed. Write-on-change: a terminal-property set is network-replicated, so flip
-        // only a machine currently on — after the first scan this never writes again. Keyed on the same fed
-        // interfaces as FeedKindOf; a non-fed block (assembler, cargo) matches nothing and is left untouched.
+        // A fed machine's conveyor auto-pull would refill past the fill target and fight the feed. Write-on-change: a
+        // terminal-property set is network-replicated.
         public static void DisableConveyorSystem(IMyTerminalBlock block)
         {
             var reactor = block as IMyReactor;
@@ -130,11 +103,7 @@ namespace IngameScript
             if (refinery != null && refinery.UseConveyorSystem) refinery.UseConveyorSystem = false;
         }
 
-        // How many units of a stack to move into a machine so its fill lands ON the target, not at 100%.
-        // TransferItemTo moves the WHOLE stack handed to it, so an uncapped stack fills the machine to max
-        // regardless of the soft target — hence the computed cap: roomVol / per-unit volume, clamped to the
-        // stack size. A non-fractional item can only move whole units, so floor it; a fractional item moves the
-        // exact partial. Returns 0 when there is no room, no per-unit volume, or less than one whole unit fits.
+        // An uncapped TransferItemTo fills the machine to max, so the move is capped to land the fill on its target.
         public static double FeedUnits(double roomVol, double perUnitVol, double stackUnits, bool usesFractions)
         {
             if (roomVol <= 0.0 || perUnitVol <= 0.0) return 0.0;
@@ -144,8 +113,37 @@ namespace IngameScript
             return units < 0.0 ? 0.0 : units;
         }
 
-        // Cap a count-based move: take at most `want` units of a `stackUnits` stack, flooring to whole units for a
-        // non-fractional item (which can't move a partial). Used by a reserve intake to move only its deficit.
+        // A member whose share of a split would be under this fraction of its target drops out of the split, so a
+        // small stack goes whole to the emptiest machines rather than costing a transfer per machine.
+        public const double MinShare = 0.1;
+
+        // Water-fill: pouring a stack into machines raises the emptiest to one common fill (a fraction of each one's
+        // target), so a short supply leaves none empty while another sits full. Pouring in parts reaches the level
+        // pouring the total would, so each placement needs only the stack in hand. fills ascend, paired with targets.
+        public static double LevelShare(List<double> fills, List<double> targets, double volume, double fill, double target)
+        {
+            var n = fills.Count;
+            if (n == 0) return 0.0;
+            double sumT = 0, sumFT = 0, level = 0;
+            var k = 0;
+            for (; ; k++)
+            {
+                sumT += targets[k];
+                sumFT += fills[k] * targets[k];
+                level = (volume + sumFT) / sumT;
+                if (k == n - 1 || level <= fills[k + 1]) break;
+            }
+            level = Math.Min(level, 1.0);
+            while (k > 0 && level - fills[k] < MinShare)
+            {
+                sumT -= targets[k];
+                sumFT -= fills[k] * targets[k];
+                k--;
+                level = Math.Min((volume + sumFT) / sumT, 1.0);
+            }
+            return Math.Max(0.0, level - fill) * target;
+        }
+
         public static double CapUnits(double want, double stackUnits, bool usesFractions)
         {
             var units = want < stackUnits ? want : stackUnits;
@@ -163,19 +161,13 @@ namespace IngameScript
         public static MyFixedPoint Amount(double units, MyInventoryItem item) =>
             LeavesDust(units, (double)item.Amount) ? item.Amount : (MyFixedPoint)units;
 
-        // Is a stack sitting in a constraint-limited inventory foreign (evict) or legitimate (keep)?
-        // CanItemsBeAdded gives one "no" for two reasons — the constraint rejects the type, or the inventory is
-        // too full for another unit — so disambiguate by per-unit volume: a "no" (canAddOne=false) means a
-        // genuine constraint rejection only when a whole unit WOULD fit on volume. When less than a unit of room
-        // remains the "no" is volume-driven, so keep the item — honoring a manual over-fill at any level.
+        // CanItemsBeAdded's "no" means a constraint rejection or no room for a unit, so it counts as foreign only when
+        // a whole unit would fit on volume — honoring a manual over-fill at any level.
         public static bool IsForeign(double freeVol, double perUnitVol, bool canAddOne) =>
             freeVol < perUnitVol ? false : !canAddOne;
     }
 
-    // The live IAssemblerState over one IMyAssembler. GetQueue and CanUseBlueprint are local reads (no conveyor
-    // call); all instances share one reused MyProductionItem buffer — safe because the ledger walk touches one
-    // assembler at a time. Append and the mode set are the network-replicated terminal actions the craft stepper
-    // budgets to one per tick.
+    // The instances share one queue buffer, safe because the ledger walk reads one assembler at a time.
     public class AssemblerState : IAssemblerState
     {
         const string BlueprintPrefix = "MyObjectBuilder_BlueprintDefinition/";

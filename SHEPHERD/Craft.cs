@@ -3,10 +3,9 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // The craft planner's whole output vocabulary. Append/restore, plus one clear that only ever targets the tracked
-    // disassembler (taken over empty) once its queue has stalled — so a user's own queue can only grow or complete.
-    // StopCooperating drains the Coop picked to disassemble; the mark check turns its switch back on once released.
-    // Trim takes back only units SHEPHERD queued itself.
+    // ClearQueue targets only the tracked disassembler (taken over empty) once stalled, and Trim takes back only units
+    // SHEPHERD queued, so a user's own queue can only grow or complete. StopCooperating drains the Coop lent to
+    // disassembly; the mark check turns its switch back on once released.
     public enum CraftActionKind { AppendAssembly, SetDisassembly, AppendDisassembly, RestoreAssembly, ClearQueue, StopCooperating, Trim }
 
     public struct CraftAction
@@ -15,14 +14,12 @@ namespace IngameScript
         public IAssemblerState Assembler;
         public string Blueprint;
         public double Amount;
-        public string Item;    // the item key the action serves — diagnostics only
+        public string Item;
     }
 
-    // The game-free Craft planner: one pass per cycle over the filled ledger and the walk's assembler snapshots,
-    // producing a bounded action list plus the blocked-demand outputs (NeedBlueprint feeds status and blueprint
-    // discovery). Deficits/surpluses are already net of queued work and capped by authorization (the ledger's
-    // math), so a queue that covers its demand plans no action at all — write-on-change by construction. A mode
-    // change is only ever emitted for an empty assembler, and only the one tracked disassembler is ever restored.
+    // Deficits and surpluses come net of queued work and capped by authorization (the ledger's math), so a queue that
+    // covers its demand plans no action: write-on-change by construction. A mode change is only planned for an empty
+    // assembler.
     public class CraftPlanner
     {
         readonly List<CraftAction> actions = new List<CraftAction>();
@@ -49,13 +46,10 @@ namespace IngameScript
         readonly List<QueueClaim> claims = new List<QueueClaim>();
         readonly List<QueueEntry> queueScratch = new List<QueueEntry>();
 
-        // Units SHEPHERD itself queued on one assembler, per blueprint, so a trim only ever takes back its own work.
-        // Building and a Coop's batch take from the front of the queue, so each drop in the assembler's units of the
-        // blueprint uses up the units queued Ahead of SHEPHERD's before its own: the player's units queued later sit
-        // behind and never keep the claim alive once its own are built. Last is that count as last seen. A player's
-        // append in the same plan as a drop hides the drop, which can leave one cycle's building in the claim. Not
-        // persisted: after a recompile nothing is trimmed until SHEPHERD queues again, which errs toward leaving
-        // work alone.
+        // Units SHEPHERD queued on one assembler per blueprint, so a trim only takes back its own work. Building and a
+        // Coop's batch take from the queue's front, so a drop in the blueprint's units uses up the units Ahead first;
+        // the player's later units sit behind. Last is the count as last seen; a player's append in the same plan
+        // hides a drop. Not persisted: after a recompile nothing is trimmed until SHEPHERD queues again.
         class QueueClaim
         {
             public long Id;
@@ -64,9 +58,8 @@ namespace IngameScript
             public bool Seen;
         }
 
-        // The one assembler SHEPHERD switched to Disassembly (0 = none). Persisted by Program in the managed
-        // [Production] section so a recompile can distinguish our disassembler from a user's deliberate
-        // Disassembly mode; re-seeded from disk at startup/configReload.
+        // The one assembler SHEPHERD switched to Disassembly (0 = none); persisted so a recompile can tell it from a
+        // user's own Disassembly mode.
         public long TrackedDisassembler;
 
         public List<CraftAction> Actions => actions;
@@ -95,8 +88,7 @@ namespace IngameScript
             heldDisassembly.Empty();
             GroupModels(assemblers);
             ReconcileClaims(ledger, facts, assemblers);
-            // The game gives a cooperative assembler work only in Assembly mode, so a Coop left in Disassembly
-            // (re-tagged mid-run, or set by hand) would idle for good; once its own queue is done it goes back.
+            // The game gives a Coop work only in Assembly mode, so one left in Disassembly would idle for good.
             foreach (var s in assemblers)
             {
                 var st = s.State;
@@ -108,11 +100,8 @@ namespace IngameScript
             ledger.CollectKeys(keyScratch);
             foreach (var key in keyScratch)
             {
-                // Below one whole unit is the deadband: queue items are integral, so a fractional remainder is
-                // "at target". Deficit and surplus are mutually exclusive per key (same floor/cap arithmetic) —
-                // but a queue in the OPPOSITE direction can coexist with either (a stale order the vanished stock
-                // no longer justifies, or a user's own), and planning against it feeds one order into the other.
-                // Each direction holds while the opposite queue stands; held keys are surfaced, not silent.
+                // Below one whole unit is the deadband: queue items are integral. A queue in the opposite direction (a
+                // stale order or a user's own) holds the key, since planning against it feeds one order into the other.
                 var deficit = ledger.AssemblyDeficit(key);
                 if (deficit >= 1.0)
                 {
@@ -131,8 +120,7 @@ namespace IngameScript
 
         static bool IsHomeCoop(IMarkedAssembler a) => a.Construct == 0 && a.Mark == AssemblerMark.Coop && a.CanCooperate;
 
-        // The count is read before the append, so the new units are known to sit behind everything already queued.
-        // Dry claims nothing: the append was never made.
+        // Counted before the append, so the new units are known to sit behind everything already queued.
         public void Append(IAssemblerState a, string key, string blueprint, double units, bool dry)
         {
             double removable;
@@ -178,8 +166,8 @@ namespace IngameScript
         // excess says nothing about it; its disassembly queue is still counted as outgoing.
         void ReconcileClaims(ProductionLedger ledger, ProductionFacts facts, List<AssemblerSnapshot> assemblers)
         {
-            // The tracked disassembler was taken over empty, so its whole queue is SHEPHERD's — after a recompile too,
-            // which forgets the claims while that queue keeps pulling the item through the conveyor, quota stock included.
+            // The tracked disassembler was taken over empty, so its whole queue is SHEPHERD's, even after a recompile
+            // forgets the claims while that queue keeps pulling quota stock in.
             long whole = 0;
             foreach (var s in assemblers)
             {
@@ -211,8 +199,8 @@ namespace IngameScript
             }
         }
 
-        // An assembler's units of one blueprint, and how many one trim can take: the newest such entry, less the unit
-        // in production. Re-read only for an assembler holding SHEPHERD's own work, since the snapshot keeps a total.
+        // One trim can take the newest entry of the blueprint, less the unit in production. Re-read only for an
+        // assembler holding SHEPHERD's own work, since the snapshot keeps a total.
         double Queued(IAssemblerState a, string blueprint, out double removable)
         {
             a.QueueInto(queueScratch);
@@ -227,11 +215,10 @@ namespace IngameScript
             return total;
         }
 
-        // A release waits one cycle before re-acquisition to prevent two opposing mode changes in one plan. A queue that
-        // stops moving waits on items that are gone, so it is cleared: the next plan restores the assembler and
-        // re-queues whatever surplus still stands.
-        // A Coop picked while still in Assembly mode is draining: with its switch off it takes no more batches from
-        // the Main, so once its own is done it stays empty and can switch mode without touching anyone's work.
+        // A release waits a cycle before re-acquiring, so one plan never makes two opposing mode changes. A stalled
+        // queue waits on items that are gone, so it is cleared; the next plan restores the assembler and re-queues any
+        // surplus. A Coop picked in Assembly mode drains first: with its switch off it takes no more batches, so once
+        // empty it can switch mode without touching anyone's work.
         bool ReconcileTracked(List<AssemblerSnapshot> assemblers, double nowSeconds)
         {
             StalledQueueStatus = null;
@@ -241,7 +228,7 @@ namespace IngameScript
             {
                 var st = s.State;
                 if (st.Id != TrackedDisassembler) continue;
-                // Re-marked away from taking orders: the player took it over, and Manual means no mode changes.
+                // Re-marked away from taking orders: the player took it over.
                 if (!MarkCheck.TakesOrders(st) && !IsHomeCoop(st)) break;
                 if (!st.IsDisassembling && IsHomeCoop(st))
                 {
@@ -278,12 +265,10 @@ namespace IngameScript
             return false;
         }
 
-        // Assemblers of one model accept the same blueprints, so compatibility is probed once per model per key
-        // rather than once per assembler — the probe parses a definition id, and a big base multiplies it.
-        // A working Coop takes small batches from whichever reachable Main has a queue, picked at random — docked
-        // ones across the connector too — so the Coops are one pool shared evenly by every Main: each Main's weight
-        // and queue include its share of the pool's speed and queued units. Whether a Coop can make a given item
-        // isn't probed, so a pool of mixed models is weighted roughly. The tracked disassembler helps no one.
+        // Assemblers of one model accept the same blueprints, so compatibility is probed once per model per key — the
+        // probe parses a definition id, and a big base multiplies it. A working Coop takes batches from a random
+        // reachable Main with a queue (docked ones too), so the Coops are one pool shared evenly by every Main. A
+        // Coop's ability to make an item isn't probed, so a pool of mixed models is weighted roughly.
         void GroupModels(List<AssemblerSnapshot> assemblers)
         {
             modelOf.Empty();
@@ -323,11 +308,9 @@ namespace IngameScript
             }
         }
 
-        // A deficit is spread so every compatible assembler would finish its queue at about the same time: each
-        // tops its queue up toward one common finish level, in proportion to its speed, and work planned for
-        // earlier keys counts as queued. Queues are measured in units — the PB can't read a blueprint's build
-        // time — so a mixed queue balances only roughly. A share under MinShare isn't worth its own queue
-        // append, so the smallest share drops out until every remaining one clears it (or one is left).
+        // A deficit is spread so every compatible assembler would finish at about the same time, counting work planned
+        // for earlier keys. Queues are in units (a PB can't read build time), so a mixed queue balances roughly. A
+        // share under MinShare isn't worth its own append, so the smallest drops out until all clear it or one is left.
         void PlanAssembly(string key, double amount, ProductionFacts facts, List<AssemblerSnapshot> assemblers, long unavailableAssembler)
         {
             string bp = null;
@@ -390,14 +373,11 @@ namespace IngameScript
             }
         }
 
-        // True surplus is disassembled on ONE assembler at a time: the tracked one if it is still ours (append
-        // more work to it), else one is acquired and tracked. The slowest compatible home Coop goes first, so the Main
-        // and the faster Coops keep assembling; a busy Coop is drained before its mode changes. Only with no such Coop
-        // does the fastest empty home receiver no assembly was planned onto this pass take it, holding the home's
-        // assembly until done. Never a docked one: a ship leaving mid-order would take the queue along and shred
-        // that item from its own cargo, out of SHEPHERD's reach. An occupied assembler's mode is never touched (acquisition requires an empty queue,
-        // structurally), nor is an empty one already in Disassembly: that mode is the user's, and taking it over would
-        // end with SHEPHERD switching it back to Assembly.
+        // Surplus is disassembled on one assembler at a time. The slowest compatible home Coop goes first, so the Main
+        // and faster Coops keep assembling; a busy Coop is drained before its mode changes. Only with no such Coop does
+        // the fastest empty home receiver with no assembly planned this pass take it. Never a docked one: a ship leaving
+        // mid-order would shred that item from its own cargo. An empty one already in Disassembly is the user's: taking
+        // it over would end with SHEPHERD switching it back to Assembly.
         void PlanDisassembly(string key, double amount, ProductionFacts facts, List<AssemblerSnapshot> assemblers, bool released, long unavailableAssembler)
         {
             string bp;
@@ -480,9 +460,7 @@ namespace IngameScript
         }
     }
 
-    // The live craft stepper: exactly one consequential machine mutation (queue append, clear or mode set) per Step,
-    // returned as Moved so the scheduler attributes it like a transfer and arms the post-heavy refractory. A plan
-    // holds only a few mutations, so spacing them costs little. Pooled: Rearm copies the plan. An append is claimed
+    // One machine mutation per Step, returned as Moved so the scheduler spaces it like a transfer. An append is claimed
     // only once it lands, so a plan dropped before running never claims the player's units of the same blueprint.
     public class CraftJob : IStepJob
     {
@@ -490,7 +468,7 @@ namespace IngameScript
         CraftPlanner planner;
         int cursor;
 
-        // A dry job makes none of its actions; Program runs one of each kind that way, on a real assembler.
+        // Makes none of its actions; Program runs one of each kind this way on a real assembler.
         public bool Dry;
 
         public void Rearm(CraftPlanner planned, List<CraftAction> list)

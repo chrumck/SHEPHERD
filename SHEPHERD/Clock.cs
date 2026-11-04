@@ -2,9 +2,8 @@ using System;
 
 namespace IngameScript
 {
-    // Formats a wall-clock time as a fixed-width stamp. The caller passes the already-offset time; the game
-    // exposes no local time zone, so the offset is applied upstream. Built by hand from the components rather
-    // than DateTime.ToString(format) to sidestep any culture-dependent time separator.
+    // Built from the components, not DateTime.ToString(format), to sidestep a culture-dependent time separator. The
+    // caller applies the offset: the game exposes no local time zone.
     public static class Clock
     {
         public static string Hms(DateTime t) => P2(t.Hour) + ":" + P2(t.Minute) + ":" + P2(t.Second);

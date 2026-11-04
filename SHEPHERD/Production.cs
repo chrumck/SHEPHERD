@@ -3,23 +3,19 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // One refinery output of an ore: Ratio units of Output item per one unit of ore input.
+    // Ratio is Output units per unit of ore.
     public struct OreYield
     {
         public string Output;
         public double Ratio;
     }
 
-    // The game-free production-knowledge store: item key -> assembler blueprint subtype (with the reverse map for
-    // attributing live queues back to items) and ore key -> refinery output ratios. Vanilla facts are baked in;
-    // only learned modded additions persist.
+    // Vanilla facts are baked in; only learned modded additions persist.
     public class ProductionFacts
     {
-        // Most vanilla blueprints follow a naming convention (resolved live, nothing baked): blueprint subtype ==
-        // item subtype, or item subtype + "Component". The baked table holds only the exceptions, generated fresh
-        // from the game's Content/Data/Blueprints.sbc. Entry: <typeCode><itemSubtype>;<positionDigits>
-        // [;<blueprintName>] — every exception blueprint is "Position<digits>_<name>", and <name> defaults to the
-        // item subtype minus a trailing "Item", so it is only spelled out where that derivation fails.
+        // Most vanilla blueprints follow a convention resolved live (blueprint == item subtype, or + "Component"), so
+        // only the exceptions are baked, from the game's Blueprints.sbc. Entry: <typeCode><itemSubtype>;<digits>[;<name>]
+        // for blueprint "Position<digits>_<name>"; <name> defaults to the subtype less a trailing "Item".
         const string BakedBlueprints =
             "KCanvas;0030|CMedkit;0021|CPowerkit;0022|DDatapad;0040|OOxygenBottle;0010|GHydrogenBottle;0020"
             + "|PFlareGunItem;0050|AFlareClip;0051;FlareGunMagazine|AFireworksBoxBlue;0060|AFireworksBoxGreen;0061"
@@ -36,10 +32,9 @@ namespace IngameScript
             + "|ANATO_25x184mm;0080;NATO_25x184mmMagazine|AAutocannonClip;0090|AMissile200mm;0100"
             + "|AMediumCalibreAmmo;0110|ALargeCalibreAmmo;0120|ASmallRailgunAmmo;0130|ALargeRailgunAmmo;0140";
 
-        // Refinery ratios per one unit of ore, from the same Blueprints.sbc pass (Stone normalized from the
-        // per-1000 blueprint). "Ore/" and "Ingot/" prefixes are implied. Ice and Organic are present with ZERO
-        // outputs: they yield no ingots (gas / nothing), and baking that fact keeps them KNOWN — never scored,
-        // never flagged for yield learning. Entry: <ore>[;<output>:<ratio>[,<output>:<ratio>...]]
+        // From the same Blueprints.sbc pass (Stone normalized from its per-1000 blueprint); "Ore/" and "Ingot/" are
+        // implied. Ice and Organic have no outputs, baked so they stay known: never scored, never sent to yield
+        // learning. Entry: <ore>[;<output>:<ratio>[,<output>:<ratio>...]]
         const string BakedYields =
             "Iron;Iron:0.7|Nickel;Nickel:0.4|Cobalt;Cobalt:0.3|Silicon;Silicon:0.7|Magnesium;Magnesium:0.007"
             + "|Silver;Silver:0.1|Gold;Gold:0.01|Platinum;Platinum:0.005|Uranium;Uranium:0.01|Scrap;Iron:0.8"
@@ -87,9 +82,7 @@ namespace IngameScript
         public bool TryBlueprint(string itemKey, out string blueprint) =>
             blueprintOf.Get(itemKey, out blueprint);
 
-        // The known map, then the convention candidates — each validated through the caller's probe (live: an
-        // assembler's CanUseBlueprint; tests: a mock) and session-cached on success. A failed probe is NOT cached:
-        // the candidate may validate later against a different assembler.
+        // A failed probe is not cached: the candidate may validate later against a different assembler.
         public bool TryResolveBlueprint(string itemKey, Func<string, bool> canUse, out string blueprint)
         {
             if (blueprintOf.Get(itemKey, out blueprint)) return true;
@@ -99,10 +92,8 @@ namespace IngameScript
                 || Probe(itemKey, subtype + "Component", canUse, out blueprint);
         }
 
-        // Queue attribution: the known map, then the reverse convention — a convention blueprint always makes a
-        // Component, and no vanilla item subtype itself ends in "Component", so the suffix strip is unambiguous.
-        // An unknown modded blueprint thus attributes to a phantom Component key; harmless, since a key nothing
-        // has a quota for never produces an action.
+        // A convention blueprint always makes a Component and no vanilla item subtype ends in "Component", so the strip
+        // is unambiguous. An unknown modded blueprint lands on a phantom key, harmless since no quota references it.
         public string ItemOf(string blueprint)
         {
             string itemKey;

@@ -4,12 +4,8 @@ using System.Text;
 
 namespace IngameScript
 {
-    // The production section of the status panel, composed once per plan tick from the planners' outputs. Two kinds
-    // of line: an ACTION describes work happening right now (status only — a per-plan changing amount would turn the
-    // log into a per-cycle stream), a STATE an obstruction or learning step that holds until something changes.
-    // States go through a StateChannel, so a state's one string is both the panel line and the log entry and the two
-    // surfaces cannot word the same condition differently. Wording is operation-first ("craft X: no blueprint") so a
-    // glance reads as verb, subject, obstruction.
+    // Actions stay off the log: a per-plan changing amount would make it a per-cycle stream. States go through a
+    // StateChannel, so the panel line and the log entry are one string and can't word a condition differently.
     public class ProductionStatus
     {
         readonly List<string> actions = new List<string>();
@@ -32,8 +28,7 @@ namespace IngameScript
                 else if (a.Kind == CraftActionKind.AppendDisassembly) actions.Push("disassembling " + a.Item + " " + a.Amount);
             }
             foreach (var r in refine.Requests) actions.Push("refining " + r.Ore + " for " + r.Ingot);
-            // A knowledge request for the item means learning is already under way and says so in its own line;
-            // the generic obstruction would only restate it less usefully.
+            // A knowledge request already says learning is under way; the generic obstruction would restate it.
             foreach (var key in craft.NeedBlueprint)
                 if (!discovery.HasBlueprint(key)) states.Push("craft " + key + ": no blueprint");
             states.Push(probe.Status);
@@ -55,11 +50,8 @@ namespace IngameScript
         }
     }
 
-    // One category's fill state for the status LCD readout: its name, whether any container accepts it, and the
-    // aggregate fill fraction (0..1) across those containers. Reused across renders (the live layer refills the
-    // same instances each tick). Cur/Max/Explicit are the live layer's per-render tally. Overflow marks a category
-    // whose only home is the catch-all: its fill is the catch-all row's, so repeating it per category would make
-    // every unhomed row read the same number and hide which categories actually have a container.
+    // Reused across renders. Overflow marks a category whose only home is the catch-all: repeating the catch-all
+    // row's fill on every such row would hide which categories have a container of their own.
     public class CategoryFill
     {
         public readonly string Name;
@@ -68,10 +60,7 @@ namespace IngameScript
         public CategoryFill(string name) { Name = name; }
     }
 
-    // Formats the [SHEPHERD] status LCD: the glanceable human view — a run-state health word, a liveness stamp,
-    // and a per-category fill bar. Rendered as ONE text string (Unicode block chars in a fixed-width font),
-    // never sprites, so the whole screen is a single cheap WriteText (a sprite DrawFrame is an atomic multi-ms
-    // spike). Runtime numbers stay on [SHEPHERD-DEBUG], not here.
+    // One text string of block chars, never sprites: a sprite DrawFrame is an atomic multi-ms spike, a WriteText cheap.
     public static class StatusView
     {
         const int BarWidth = 10;
@@ -79,13 +68,9 @@ namespace IngameScript
         const char Filled = '█';
         const char Empty = '░';
 
-        // stamp is the current wall-clock — it advances every render as a "not stuck" liveness signal and shares
-        // the log lines' time source, so a log stamp can be read against it to see how recent an entry is. blockName
-        // (the rendering PB's name, on its own line so a long name never pushes the health word off the panel) says
-        // which of several SHEPHERD PBs leads.
-        // messages is the fixed set of blocks whose contents change in place (each is a StateChannel's live set or
-        // the production actions), so a render never allocates and never has to be handed a rebuilt list.
-        // assemblers sits above the rule because it describes the setup, not something to act on; negative omits it.
+        // stamp shares the log lines' clock, so a log entry's age reads against it. blockName has its own line so a
+        // long name never pushes the health word off the panel. messages' lists are filled in place, so a render
+        // never allocates. assemblers sits above the rule because it describes the setup; negative omits it.
         public static void Render(StringBuilder sb, string version, string blockName, string health, string stamp,
                                   List<CategoryFill> fills, List<CategoryFill> reserves, List<List<string>> messages,
                                   int assemblers = -1, bool disassembling = false, int wrap = 0)
@@ -113,17 +98,13 @@ namespace IngameScript
                 foreach (var r in reserves)
                 {
                     sb.Put(Pad(r.Name));
-                    // Reserve fill is quota-based (have/want) and may exceed 100% when over-stocked, unlike the
-                    // volume-bounded category fills — so its percent isn't clamped. A pool with only All-mode
-                    // quotas has no target to measure against, so it shows a marker instead of a bar.
+                    // A pool with only All quotas has no target to measure against.
                     if (!r.HasRoute) { sb.Line("──all──"); continue; }
                     AppendBar(sb, r.Fraction, true);
                     sb.Line();
                 }
             }
-            // The message section: current production work plus every standing state. Its rule is drawn even when
-            // there is nothing to say, so the panel's layout doesn't shift under the reader as states come and go —
-            // and an empty section is itself the signal that nothing needs attention.
+            // Drawn even with nothing to say, so the layout doesn't shift as states come and go.
             for (var i = 0; i < NamePad + BarWidth; i++) sb.Put('─');
             sb.Line();
             if (messages != null)
@@ -131,8 +112,8 @@ namespace IngameScript
                     foreach (var line in block) Wrapped(sb, line, wrap);
         }
 
-        // A panel's font is sized to its bars, so a long message runs off the edge; it breaks at the last space that
-        // fits, or mid-word when none does, and its continuation lines are indented so each still reads as one message.
+        // A panel's font is sized to its bars, so a long message would run off the edge; continuations are indented
+        // so each still reads as one message.
         static void Wrapped(StringBuilder sb, string line, int width)
         {
             var indent = "";
@@ -148,8 +129,7 @@ namespace IngameScript
             sb.Put(indent).Line(line);
         }
 
-        // The bar always clamps to [0, BarWidth]; allowOver lets the trailing percent run past 100 (reserve quota
-        // fill can be over-stocked, category volume fill cannot).
+        // Reserve quota fill can be over-stocked, category volume fill cannot.
         static void AppendBar(StringBuilder sb, double fraction, bool allowOver)
         {
             var frac = fraction < 0.0 ? 0.0 : fraction > 1.0 ? 1.0 : fraction;
@@ -167,11 +147,8 @@ namespace IngameScript
         }
     }
 
-    // Formats one reserve pool for a [SHEPHERD-RESERVE] levels LCD, or one category's grid-wide stock for a
-    // [SHEPHERD:...] LCD. Items are grouped under their TypeId so each line carries only the SubtypeId: the type
-    // alone tells Ore/Iron from Ingot/Iron, and header + "/" + line name rebuilds the exact Custom Data key. A
-    // configured pool shows have/quota per quota line; an unconfigured one lists everything its containers hold, so
-    // the user can read the keys to write its quota section.
+    // Grouped under the TypeId so the type tells Ore/Iron from Ingot/Iron and header + "/" + line name rebuilds the
+    // Custom Data key. An unconfigured pool lists everything its containers hold, so the user can read the keys.
     public static class LevelsView
     {
         static readonly List<string> keys = new List<string>();
@@ -197,8 +174,8 @@ namespace IngameScript
             Lines(sb, configured ? pool : null);
         }
 
-        // stockKeys/categories are parallel; a key with nothing in stock is left off. A null category is the
-        // catch-all section: whatever the catch-all containers hold, of any category.
+        // stockKeys/categories are parallel. A null category is the catch-all section: what the catch-all containers
+        // hold, of any category.
         public static void Render(StringBuilder sb, string category, List<string> stockKeys, List<string> categories, ProductionLedger ledger)
         {
             if (sb.Length > 0) sb.Line();
@@ -229,8 +206,7 @@ namespace IngameScript
                 if (level.Length > levelWidth) levelWidth = level.Length;
             }
 
-            // Each type's lines together, the types in first-seen order: a counting pass, since a stock panel can
-            // list hundreds of items in a single run.
+            // A counting pass, not a sort: a stock panel can list hundreds of items in one run.
             groupOf.Empty();
             group.Empty();
             starts.Empty();
@@ -260,7 +236,7 @@ namespace IngameScript
             }
         }
 
-        // The one place an item's display name is derived, so a future alias lookup replaces only this.
+        // The one place a display name is derived, so an alias lookup would replace only this.
         static string Name(string key) => key.Cut(key.IndexOf('/') + 1);
 
         static string TypeOf(string key)

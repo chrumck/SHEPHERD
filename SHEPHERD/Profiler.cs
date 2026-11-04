@@ -2,15 +2,10 @@ using System.Text;
 
 namespace IngameScript
 {
-    // Formats the [SHEPHERD-DEBUG] diagnostics view: a header (version / run-state / wake cadence / the rendering PB's
-    // name / cycle & block counts / uptime / peak & rolling-average ms / estimated sim speed / share of time at each
-    // wake rate) then the per-kind run
-    // table (count / max ms / avg ms / runs over the peak bar). The runtime numbers live here, not on the glanceable
-    // status LCD.
     public static class Profiler
     {
-        // THROTTLED U10 is either a breach back-off or the sim park's wary stage, so both are shown side by side,
-        // each as engagements and share of the window's sim-time, to tell which is holding the cadence.
+        // THROTTLED U10 is either a breach back-off or the sim park's wary stage, so both are shown, as engagements and
+        // share of sim-time, to tell which holds the cadence.
         public static void Render(StringBuilder sb, string version, string blockName, string state, string cadence, int cycles,
                                   int managed, int dest, int throttles, double throttleSec, int waries, double warySec,
                                   double sim, double simAvg, RunStats stats)
@@ -22,9 +17,9 @@ namespace IngameScript
             sb.Put("managed ").Put(Count(managed)).Put(" · dest ").Put(Count(dest)).Line();
             sb.Put("peak ").Put(Ms(stats.PeakMs)).Put(" ms · avg50 ").Put(Ms(stats.SlidingAvgMs))
               .Line(" ms");
-            // sim = the last instant estimate (the park trigger), then the running average (the resume trigger).
             sb.Put("thr x").Put(Count(throttles)).Put(" ").Put(Share(throttleSec, stats.WindowSec))
               .Put(" · wary x").Put(Count(waries)).Put(" ").Line(Share(warySec, stats.WindowSec));
+            // The instant estimate (the park trigger), then the average (the resume trigger).
             sb.Put("sim ").Put(sim.ToString("0.00")).Put("/").Put(simAvg.ToString("0.00")).Line();
             sb.Put("U1 ").Put(Share(stats.RateSec(0), stats.WindowSec))
               .Put(" · U10 ").Put(Share(stats.RateSec(1), stats.WindowSec))
@@ -39,7 +34,7 @@ namespace IngameScript
             Row(sb, stats, RunKind.Other);
         }
 
-        // Indexed by RunKind; shared with the throttle log line so it names the arming run as the table does.
+        // Indexed by RunKind, so the order follows the enum. Also names the run in the throttle log line.
         static readonly string[] Tags = { "othr", "scan", "xfer", "ftch", "plan", "save", "cmd", "bld" };
 
         public static string Tag(RunKind kind) => Tags[(int)kind];
@@ -58,8 +53,7 @@ namespace IngameScript
 
         static string Dur(double sec) { var s = (int)sec; return s >= 60 ? (s / 60) + "m" + (s % 60) + "s" : s + "s"; }
 
-        // A compact count — up to 4 significant digits with a k/M/G suffix — so a long-running tally stays
-        // legible instead of sprawling to "othr x2534187".
+        // k/M/G-suffixed, so a long-running tally stays legible.
         static string Count(int n)
         {
             if (n < 10000) return n.ToString();

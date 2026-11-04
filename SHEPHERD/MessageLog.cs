@@ -4,13 +4,9 @@ using System.Text;
 
 namespace IngameScript
 {
-    // The set of states currently asserted by one recompute event, plus entry-edge logging. Begin/Add rebuild the
-    // set; Commit emits to the log sink only the newly asserted entries and forgets any no longer asserted (so a
-    // returning state emits again). `Current` is that live set — the status panel renders it, so a state shows for
-    // exactly as long as it holds while the log keeps only its edges. One instance per recompute cadence: Commit
-    // prunes whatever its own set no longer asserts, so mixing cadences in one channel would prune each other.
-    // Several channels may share a cadence (they prune independently); a channel is status-visible only if its
-    // Current is handed to the renderer, which is how a log-only diagnostic stays log-only.
+    // The panel shows a state for as long as it holds; the log gets only its entry edge, again if it returns. One
+    // channel per recompute cadence: Commit prunes whatever its own set no longer asserts, so mixed cadences would
+    // prune each other. A channel whose Current isn't handed to the renderer stays log-only.
     public class StateChannel
     {
         readonly Action<string> log;
@@ -34,9 +30,7 @@ namespace IngameScript
         }
     }
 
-    // A bounded rolling buffer of the most recent diagnostic lines behind the [SHEPHERD-LOG] surface. Add drops
-    // the oldest line past capacity. The Dirty flag lets the renderer rewrite the surface only when the content
-    // changed, not every tick.
+    // Dirty lets the renderer rewrite the surface only when the content changed.
     public partial class MessageLog
     {
         readonly List<string> lines = new List<string>();

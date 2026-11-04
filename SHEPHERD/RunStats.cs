@@ -1,43 +1,34 @@
 namespace IngameScript
 {
-    // Which kind of tick a run-time sample belongs to, so the instrument can separate runs with very different
-    // costs: Fetch (the GetBlocksOfType sweep), Scan (a classify batch), Build (a build step over a slice of the
-    // managed set), the network-bound Transfer,
-    // Plan (the production-plan tick, whose work grows with quotas and machines), Save (the Custom Data
-    // rewrite), Command (a non-tick run: a terminal command or the limiter's signal), and every other cheap tick. A PB
-    // can't read its own in-run time, so each sample is the PREVIOUS run's ms attributed to that run's kind (one tick
-    // late).
+    // Runs of very different cost are tallied apart. A PB can't read its own in-run time, so each sample is the
+    // PREVIOUS run's ms, attributed to that run's kind. Command = a non-tick run (a command or the limiter's signal).
     public enum RunKind { Other, Scan, Transfer, Fetch, Plan, Save, Command, Build }
 
-    // A running tally of per-tick wall-clock ms, bucketed by RunKind, plus one all-tick peak and a rolling mean
-    // over the last WindowRuns runs — the numbers checked against the limiter's peak and average bars.
     public class RunStats
     {
-        // The limiter averages over its own last-50 non-dropped runs; match that window so SlidingAvgMs is
-        // directly comparable. We can't see GC, so unlike the limiter we can't drop GC-coincident runs — this
-        // mean includes them and reads a touch high (an upper bound on the limiter's real average).
+        // Matches the limiter's average window, so SlidingAvgMs compares directly. We can't see GC, so unlike the
+        // limiter this mean keeps GC-coincident runs and reads a touch high.
         const int WindowRuns = 50;
 
         const int Kinds = 8;
         readonly int[] runs = new int[Kinds];
-        // Runs over the peak bar. GC-coincident runs are counted too (we can't see GC), so this over-counts the
-        // limiter's offenses — but that makes it the one in-script measure of how often stalls land at all.
+        // Counts GC-coincident runs too, so it over-counts offenses — yet it is the one in-script measure of how often
+        // stalls land.
         readonly int[] over = new int[Kinds];
         readonly double[] maxMs = new double[Kinds];
         readonly double[] sumMs = new double[Kinds];
-        readonly double[] window = new double[WindowRuns]; // circular buffer of the last WindowRuns run-ms
-        int windowCount;                                   // filled slots (<= WindowRuns)
-        int windowHead;                                    // next slot to overwrite
-        double windowSum;                                  // running sum of the live window, for an O(1) mean
+        readonly double[] window = new double[WindowRuns];
+        int windowCount;
+        int windowHead;
+        double windowSum;
 
         public double PeakMs;
-        public double WindowSec; // sim-time elapsed since the last Reset
+        public double WindowSec; // sim-time
         public double BarMs = Pacer.DefaultPeakMs;
 
         public double SlidingAvgMs => windowCount > 0 ? windowSum / windowCount : 0.0;
 
-        // Sim-time spent at each wake rate (0 = Update1, 1 = Update10, 2 = Update100) — how often the loop runs
-        // over a long session, which the instantaneous rate token can't show.
+        // Sim-time at each wake rate (0 = Update1, 1 = Update10, 2 = Update100); the rate token shows only the current.
         readonly double[] rateSec = new double[3];
 
         public double RateSec(int rate) => rateSec[rate];
@@ -57,7 +48,6 @@ namespace IngameScript
         {
             if (ms > PeakMs) PeakMs = ms;
 
-            // Slide the window: once full, evict the oldest slot from the sum before overwriting it.
             if (windowCount == WindowRuns) windowSum -= window[windowHead];
             else windowCount++;
             window[windowHead] = ms;

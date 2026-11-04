@@ -2,29 +2,22 @@ using System.Collections.Generic;
 
 namespace IngameScript
 {
-    // The outcome of one stepper tick — one vocabulary for every cross-tick job, so the scheduler maps results
-    // to run kinds and pacing through a single seam instead of per-job enums. Fetched = the block sweep ran
-    // (heavy); Classified = a classify batch or the cycle build ran (heavy); Found = a transfer was prepared on
-    // the cheap find tick (the NEXT step commits it); Moved = the prepared transfer fired and moved something
-    // (the one bare heavy tick); Stalled = the transfer fired but moved nothing — the target reported room yet
-    // the conveyor call failed (unreachable / sorter-filtered), so it cost a transfer but is NOT progress (a
-    // stall-only cycle parks at idle instead of hammering a dead target at the fast cadence); Refilled = a tank
-    // was force-filled (cheap, synchronous); Scanned = the examine budget was hit mid-walk with no transfer;
-    // Planned = the production-plan tick ran; Done = nothing left.
+    // One vocabulary for every cross-tick job, so the scheduler maps results to run kinds and pacing in one place.
+    // Fetched and Classified ran a heavy step; Found prepared a transfer the NEXT step commits; Moved is that bare
+    // heavy commit; Stalled fired it but moved nothing (unreachable / sorter-filtered) — a transfer's cost but NOT
+    // progress, so a stall-only cycle parks at idle instead of hammering a dead target; Scanned hit the examine budget
+    // with no transfer.
     public enum StepResult { Fetched, Classified, Found, Moved, Stalled, Refilled, Scanned, Planned, Done }
 
-    // A resumable cross-tick job the scheduler steps one bounded unit at a time (at most one heavy engine call
-    // per Step). IsDone may lead Step's Done return: a job can complete on the same tick its last unit ran.
+    // At most one heavy engine call per Step. IsDone may lead Step's Done return: a job can complete on the same tick
+    // its last unit ran.
     public interface IStepJob
     {
         StepResult Step();
         bool IsDone { get; }
     }
 
-    // The scheduler's job queue: cross-tick jobs run one at a time, in enqueue order, one bounded Step per tick.
-    // The driver never touches pacing or game state — the scheduler maps each StepResult to run kinds and Pacer
-    // calls, and inspects LastCompleted to run a finished job's completion handling (diagnostics, enqueueing the
-    // next phase). A job finishing on a tick does NOT start the next job that same tick (one concern per tick).
+    // A job finishing on a tick does NOT start the next one that tick (one concern per tick).
     public class CycleDriver
     {
         readonly List<IStepJob> queue = new List<IStepJob>();
@@ -32,8 +25,7 @@ namespace IngameScript
 
         public IStepJob Current => current;
 
-        // The job that finished on the most recent Step; cleared by the next Step, so completion handling runs
-        // exactly once, on the tick the job finished.
+        // Cleared by the next Step, so completion handling runs exactly once, on the tick the job finished.
         public IStepJob LastCompleted;
 
         public bool HasWork => current != null || queue.Count > 0;
@@ -43,7 +35,6 @@ namespace IngameScript
             if (job != null) queue.Push(job);
         }
 
-        // Drop everything mid-cycle (crash / stand-down); the next cycle starts from a fresh enqueue.
         public void Clear()
         {
             current = null;

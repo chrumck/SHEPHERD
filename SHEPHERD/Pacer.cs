@@ -1,124 +1,93 @@
 namespace IngameScript
 {
-    // How often the scheduler should wake next — the game-free intent the Pacer emits; Program maps each to a
-    // concrete UpdateFrequency. Working = a backlog of moves is draining (wake fast: the many cheap ticks both
-    // dispatch the spaced heavy calls and dilute the rolling-average bar). Idle = caught up, or only a trickle of
-    // moves — wake moderately, not rarely: idle runs cost ~nothing against the limiter's bars and sparse transfers
-    // leave the average far below its bar, while a rare-wake idle made reacting to new work (a
-    // ship docking mid-idle-cycle) take minutes, since a whole cycle must step through before the first move is
-    // even found. Recovering = a breach was just seen, a spike hold or a stand-down runs, or the sim is wary:
-    // wake less often and fire no heavy call until it passes. Parked = a safety hold (sim park, open breaker,
-    // escalated back-off, the hold after a run gap) — wake rarely; minimal presence is the point.
+    // When the scheduler wakes next; Program maps each to an UpdateFrequency. Working = a backlog drains: wake fast,
+    // since the many cheap ticks both dispatch the spaced heavy calls and dilute the rolling average. Idle = caught up
+    // or a trickle: moderate, not rare — idle runs cost ~nothing against the bars, while a rare idle wake would make
+    // reacting to new work (a ship docking) take minutes, as a whole cycle steps through before the first move is
+    // found. Recovering = a breach, spike hold, stand-down or wary sim: wake less, fire no heavy call. Parked = a
+    // safety hold (sim park, open breaker, escalated back-off): wake rarely.
     public enum Cadence { Parked, Idle, Working, Recovering }
 
-    // The one adaptive controller. A PB cannot read its own in-run time, so every decision is driven by the
-    // PREVIOUS run's wall-clock ms (Runtime.LastRunTimeMs) — one tick late by necessity. It unifies the limiter
-    // defenses over sim-time timers (never a tick count — sim-time tracks sim-speed, as the limiter does; spike
-    // pacing alone runs on the wall clock, as the rule it keeps under does):
-    //   * an adaptive refractory after each heavy (conveyor) call — spacing that grows with the measured cost,
-    //     so a hot transfer self-paces and two heavies never land on consecutive ticks;
-    //   * a sim-speed park — the limiter charges each run divided by the sim ratio, with no server-side deferral,
-    //     so under sustained lag every run costs more and the one lever is to send fewer.
-    //     A sample spans a few ticks of game time, never one: a single tick's wall interval is near the OS
-    //     timer resolution, and one slow server tick at a healthy sim reads as deep lag, so per-tick samples
-    //     faked dips most of the time. Three-stage on top, because sustained lag is what actually matters and a
-    //     lone low sample can still be noise. Low samples are counted within a sliding window (each dip
-    //     refreshes it; expiry resets the count): the FIRST dip is only noted — full speed continues; the SECOND
-    //     holds heavy calls and slows the cadence, still ready to resume clean if the window expires; the THIRD
-    //     confirms real lag and parks fully at idle. Resuming a full park needs the sim AVERAGE to clear a higher
-    //     bar (slow to relax — the server gets time to recover, and one good sample in a dip never resumes us).
-    //     Escalation stays fast when it matters: under genuine lag every sample window is a dip, so a full park
-    //     lands in a fraction of a second, and only one refractory-spaced heavy can fire before stage two holds
-    //     them;
-    //   * a proactive back-off on a breach while working — a run the limiter would charge over the peak bar
-    //     (its ms divided by the sim ratio, as the limiter does; whether WE fired it or an external stall landed
-    //     on a cheap tick) opens a short de-cluster window, and a second breach inside it escalates to a park;
-    //     sub-breach runs are left alone (they are never offenses). Its own sim bar can confine it to lag, for a
-    //     limiter that enforces only there; at 1 it is armed at any sim. Reducing exposure is the only lever,
-    //     since we can't stop the first breach (a tick late) or see GC to match the limiter's GC-drop from the
-    //     sandbox;
-    //   * spike pacing — a run far over the peak bar is almost always a cold path (a method's first call compiles
-    //     it, so the first run of each path after a compile, a grid load or a resume from stand-by is slow, and no
-    //     split brings those under the peak bar). They have to be over before the limiter's per-block startup grace
-    //     ends, yet a server may punish a few long runs close together from the very first run. So spikes run as
-    //     fast as that rule allows: two may land back to back, and a second one inside the window parks at ANY sim
-    //     until the first has aged out of it;
-    //   * a hold after a run gap — a server that left this PB unrun for seconds is under load it has not shed yet
-    //     (after a restart or a login it holds a base's PBs until the owner's client has loaded, then stretches
-    //     cheap runs over the peak bar for a minute or more), and every run is a chance for that load to land on one. So the
-    //     hold makes few runs and fires no heavy call, except that a slow run in the limiter's 50-run average
-    //     wakes it faster: at the slow cadence that average spans over a minute;
+    // The one adaptive controller. A PB can't read its own in-run time, so every decision uses the PREVIOUS run's ms
+    // (Runtime.LastRunTimeMs), one tick late. Timers run on sim-time, which tracks sim speed as the limiter does;
+    // spike pacing alone runs on the wall clock, as the rule it keeps under does.
+    //   * a refractory after each heavy (conveyor) call, growing with its measured cost, so a hot transfer
+    //     self-paces and two heavies never land on consecutive ticks;
+    //   * a three-stage sim park — the limiter charges each run ÷ sim with no server-side deferral, so under lag the
+    //     one lever is fewer runs. Dips count within a sliding window, since a lone dip can be noise: the first is
+    //     only noted, the second holds heavies and slows the cadence, the third parks. Resuming needs the sim
+    //     AVERAGE over a higher bar, so one good sample never resumes. Under real lag every window is a dip, so a
+    //     park lands in about three windows;
+    //   * a back-off on a breach while working — a run charged over the peak bar (ours or an external stall; the
+    //     sandbox can't tell, nor see GC) opens a short de-cluster window, and a second breach inside it parks.
+    //     Sub-breach runs are never offenses and are left alone. Its sim bar can confine it to lag; at 1 it is armed
+    //     at any sim;
+    //   * spike pacing — a run far over the peak bar is almost always a cold path (a method compiles on its first
+    //     call), which no split brings under the bar and which must finish inside the limiter's startup allowance,
+    //     yet a server may punish a few long runs close together from the first run. So two may land back to back,
+    //     and a second inside the window holds heavies, at any sim, until the first has aged out;
     //   * dynamic cadence — fast only while a backlog drains, moderate otherwise, rare only under a safety park.
     public class Pacer
     {
-        // The server-matched bars: Destiny's limiter, unless [Settings] overrides them for another server.
-        public const double DefaultPeakMs = 1.5;    // the limiter's per-run peak bar — a run charged over this is an offense candidate
+        // Defaults match Destiny's limiter; [Settings] overrides them for another server.
+        public const double DefaultPeakMs = 1.5;    // the limiter's per-run peak bar
         public const double DefaultParkSim = 0.75;
         public const double DefaultResumeSim = 0.8;
         public const double DefaultBackoffSim = 1.0; // Destiny's limiter enforces at any sim speed
         const double BaseHoldSec = 0.15;     // min spacing after any heavy call (keeps heavies non-consecutive at Update1)
         const double HoldScalePerMs = 0.3;   // extra refractory per ms of the heavy call's measured cost
-        // A short de-cluster pulse, deliberately far shorter than the limiter's 15 s offence grace: the limiter
-        // already drops GC-coincident runs and debounces offenses, and a pulse near the observed breach-recurrence
-        // interval resonated into a permanent U10 lock-in. Return to U1 fast; re-arm if a real cluster recurs.
+        // Far shorter than the limiter's offense grace: it already drops GC runs and debounces offenses, and a pulse
+        // near the breach-recurrence interval resonates into a permanent U10 lock-in. Re-arms if a cluster recurs.
         const double BreachBackoffSec = 2.0;
         double breachMs = DefaultPeakMs;
-        double parkSim = DefaultParkSim;     // sim samples below this trigger the park stages; 0 = no sim park
-        double resumeSim = DefaultResumeSim; // a full park resumes only once the sim AVERAGE clears this — sustained recovery, not one good sample
-        double backoffSim = DefaultBackoffSim; // the breach back-off arms only while the sim is below this; 1 = at any sim
-        double spikeMs = DefaultSpikeMs;       // a run over this is a spike
+        double parkSim = DefaultParkSim;     // 0 = no sim park
+        double resumeSim = DefaultResumeSim; // a park resumes once the sim AVERAGE clears this
+        double backoffSim = DefaultBackoffSim; // the breach back-off arms only below this sim; 1 = at any sim
+        double spikeMs = DefaultSpikeMs;
         double spikeWindowSec = DefaultSpikeWindowSec; // at most two spikes within this; 0 = no pacing
-        // A tick whose game/wall ratio is below this was not slow, it was ABSENT: the game was paused, alt-tabbed,
-        // or saving, so game time froze while the wall clock ran on. Such an interval carries no sim-speed
-        // information at all — and taken as a measurement it reads as a ~50x-or-worse slowdown, which would
-        // crater the average for tens of seconds (holding a park that should have resumed) and could chain into
-        // a park on its own. So the sample window it falls in is dropped whole. Checked per tick, not per window,
-        // so a freeze is caught at the same length whatever the window. A slowdown this deep is also a dead
-        // server rather than one we could help by pacing.
+        // A tick with game/wall below this was absent, not slow (paused, alt-tabbed, saving): it carries no sim
+        // information, and taken as one it would crater the average for tens of seconds or park on its own. Its
+        // sample window is dropped whole; checked per tick so a freeze is caught at the same length whatever the window.
         const double SimFloor = 0.02;
-        // Three Update1 ticks, set under their sum so tick-length jitter can't stretch a window to four. Long enough
-        // that one slow server tick no longer reads as a dip; short enough that real lag still parks within a
-        // fraction of a second. At Update10 and slower every tick spans more than this, so each tick is its own sample.
-        const double SimWindowSec = 0.045;
+        // Wall time, as the limiter's sim (physics steps in the last second) counts it. A fifth of its second, so lag is
+        // met before the limiter's own reading has fallen; one late server tick reads as a dip only past ~67 ms, where
+        // over three ticks one past ~33 ms did, at a healthy sim. From Update100 each tick is a sample.
+        const double SimWindowSec = 0.2;
         const double SimAvgTauSec = 12.0;    // the average's time constant: resume takes roughly this long of healthy sim
-        // Deliberately much shorter than the observed recurrence interval of isolated dips, so unrelated dips
-        // never chain toward a park — only genuinely sustained lag (low samples fractions of a second apart)
-        // escalates. The same resonance lesson as the breach back-off window above. Sliding: each dip refreshes
-        // it, and its expiry forgets all counted dips.
+        // Much shorter than the recurrence interval of isolated dips, so unrelated dips never chain toward a park.
+        // Sliding: each dip refreshes it, and its expiry forgets all counted dips.
         const double SimWaryWindowSec = 5.0;
         public const int WaryDips = 2;       // dips within the window before heavies are held and the cadence slows
         public const int ParkDips = 3;       // dips within the window before the full park
-        // Destiny punishes 3 runs over 10 ms within 10 s at any sim speed, from the first runs after a grid loads.
-        // Both defaults keep a margin under that rule; the bar sits well above any steady-state run.
+        // Destiny punishes 3 runs over 10 ms within 10 s at any sim, from the first runs after a grid loads. Both
+        // defaults keep a margin under that rule; the bar sits well above any steady-state run.
         public const double DefaultSpikeMs = 8.0;
         public const double DefaultSpikeWindowSec = 10.5;
-        const double StandDownSec = 30.0;    // cooperative hold after a GracefulShutDown:: signal — let the offense window age out
-        const double CrashHoldSec = 2.0;     // hold after a crashing step so it can never fast-loop
-        const int MaxConsecutiveCrashes = 5; // this many crashes with no clean run between → open the breaker (park at idle)
+        const double StandDownSec = 30.0;    // lets the limiter's offense window age out
+        const double CrashHoldSec = 2.0;     // so a crashing step can never fast-loop
+        const int MaxConsecutiveCrashes = 5; // with no clean run between, opens the breaker
 
-        double holdSec;         // heavy-call refractory remaining (sim-time)
-        double backoffSec;      // cadence back-off remaining (sim-time)
-        double standDownSec;    // GracefulShutDown stand-down remaining (sim-time)
-        double spikeSec;        // spike hold remaining (wall time)
-        double clock;           // wall time since construction, for the spike window
-        double lastSpikeAt = -1e9; // when the newest spike landed
-        int windowBreaches;     // breaches recorded in the current back-off window; 1 → Recovering, 2+ → Parked (escalation)
-        int consecutiveCrashes; // crashing steps since the last clean run; a run of them opens the breaker
-        bool firedLastTick;     // a heavy fired last tick — its cost arrives as THIS tick's lastRunMs
-        bool simParked;         // repeated low sim samples confirmed real lag — hold every heavy until the average recovers
-        double simWarySec;      // sliding dip window remaining (sim-time); expiry resets the dip count
-        int simDipCount;        // low sim samples counted within the current window — the escalation stage
-        double windowGame;      // game time accumulated toward the next sim sample
+        double holdSec;         // sim-time
+        double backoffSec;      // sim-time
+        double standDownSec;    // sim-time
+        double spikeSec;        // wall time
+        double clock;           // wall time, for the spike window
+        double lastSpikeAt = -1e9;
+        int windowBreaches;     // in the current back-off window; 2+ escalates to Parked
+        int consecutiveCrashes;
+        bool firedLastTick;     // its cost arrives as THIS tick's lastRunMs
+        bool simParked;
+        double simWarySec;      // sim-time; expiry resets the dip count
+        int simDipCount;
+        double windowGame;      // game time toward the next sim sample
         double windowWall;      // wall time over the same ticks
         bool windowSpiked;      // one of our own spikes ran inside the current window
-        // The resume signal, as a ratio of two EWMAs: game time and wall time smoothed SEPARATELY, then divided.
-        // Averaging the per-sample ratios instead would be biased — the wall interval sits near the OS timer
-        // resolution at the fast cadence, and quantization noise that cancels in a summed denominator does not
-        // cancel in a mean of ratios (and clamping the over-1 samples would skew it further low).
+        // The resume signal is a ratio of two EWMAs, game and wall smoothed separately: a mean of per-sample ratios
+        // is biased, since quantization noise in a wall interval near the timer resolution cancels in a summed
+        // denominator but not in a mean of ratios.
         double simGameAvg = 1.0;
         double simWallAvg = 1.0;
-        double simInstant = 1.0; // the newest USABLE sample — dropped intervals leave it alone, so the readout
-                                 // shows the last real measurement instead of flashing a pause artifact
+        double simInstant = 1.0; // the newest usable sample; dropped windows leave it alone
 
         public bool AllowHeavy;
 
@@ -153,39 +122,30 @@ namespace IngameScript
         // Runs over the spike bar; each one is worth a log line.
         public int Spikes;
 
-        // How many times a cadence back-off has ENGAGED since the last reset (each fresh engagement, not each
-        // throttled tick). Surfaced as "thr xN" on [SHEPHERD-DEBUG]. It over-states real offenses (it can't see
-        // the limiter's GC-drop and isn't debounced), so read it as an upper bound, not the offense count.
+        // Back-off engagements since the last reset, not throttled ticks: an upper bound on offenses, since it can't
+        // see the limiter's GC-drop and isn't debounced.
         public int Backoffs;
 
-        // How many times a back-off window escalated to a park (a second breach inside it). Rare by construction:
-        // the first breach already holds every heavy call, so only an external stall can land the second.
+        // Rare by construction: the first breach already holds every heavy, so only an external stall lands a second.
         public int Escalations;
 
-        // How many times the sim park's wary stage engaged, and the sim-time spent wary or in a breach back-off since
-        // the last reset. Both hold the cadence at the same rate, so only these tell the two apart; wary edges are
-        // too frequent to log. An interval counts whole toward the state the previous tick left: the wake rate
-        // holds for all of it, even if the timer ran out partway. The two may overlap.
+        // Wary engagements, and the sim-time spent wary or backing off: both hold the same cadence, so only these tell
+        // them apart (wary edges are too frequent to log). An interval counts whole toward the state the previous tick
+        // left, since the wake rate held for all of it. The two may overlap.
         public int Waries;
         public double WaryTime;
         public double BackoffTime;
 
-        // The crash breaker is open — too many steps threw with no clean run between. Park so a persistently-
-        // crashing step is retried at most once per rare wake, never hammered. Closes on a clean run.
+        // Parked, so a persistently crashing step is retried once per rare wake, never hammered.
         public bool Halted => consecutiveCrashes >= MaxConsecutiveCrashes;
 
-        // Deliberately slowing down beyond the routine per-heavy refractory — a breach back-off, a spike hold, a crash
-        // hold, a stand-down, or the sim park is active. Surfaced as THROTTLED on [SHEPHERD-DEBUG] only, not the glanceable status LCD
-        // (throttling is common/expected, so it would be noise there). The transient per-heavy holdSec is normal
-        // working, so it is excluded; Halted is reported separately.
+        // The routine per-heavy refractory is normal working, so it is excluded. Debug panel only: throttling is
+        // common, so on the status LCD it would be noise.
         public bool Throttled => backoffSec > 0.0 || standDownSec > 0.0 || spikeSec > 0.0 || simParked || simDipCount >= WaryDips;
 
-        // Top of every tick: age the timers by the elapsed sim-time and learn from the previous run's cost.
-        // wallSeconds is the wall-clock time the same interval took; game ÷ wall over a sample window is the sim
-        // estimate — the ratio the limiter divides each run's ms by, a window late. A tick that closes no window
-        // leaves every sim-derived decision as it was. While starting, no dip is counted: the limiter charges
-        // nothing inside its startup allowance whatever the sim, and that allowance runs on the wall clock, so a
-        // park there only pushes the cold runs out of it — a server restart under deep lag did exactly that.
+        // Top of every tick. game ÷ wall over a sample window estimates the sim the limiter divides each run by; a tick
+        // that closes no window leaves every sim decision as it was. While starting no dip counts: the limiter charges
+        // nothing in its wall-clock startup allowance, so a park there only pushes the cold runs out of it.
         public void Observe(double lastRunMs, double dtSeconds, bool workPending, double wallSeconds, bool starting)
         {
             if (SimWary) WaryTime += dtSeconds;
@@ -193,17 +153,16 @@ namespace IngameScript
             holdSec = Age(holdSec, dtSeconds);
             backoffSec = Age(backoffSec, dtSeconds);
             standDownSec = Age(standDownSec, dtSeconds);
-            // The server's rule counts its 10 s on the wall clock; game time under lag stretched one window into
-            // minutes and held the cold runs past the startup allowance.
+            // The server's rule counts on the wall clock; in game time, lag would stretch one window into minutes,
+            // holding the cold runs past the startup allowance.
             var wallStep = wallSeconds > 0.0 ? wallSeconds : 0.0;
             spikeSec = Age(spikeSec, wallStep);
             simWarySec = Age(simWarySec, dtSeconds);
             if (simWarySec <= 0.0) simDipCount = 0;
 
-            // A dropped window (see SimFloor) must not move the average, must not count as a dip, and must not
-            // resume a park either. A clock running backwards is no measurement either. Nor is a window holding one
-            // of our own spikes: the previous run lies inside this interval, and a cold path's tens of ms stretch its
-            // wall time into a dip of our own making.
+            // A dropped window (see SimFloor) or a backwards clock moves no average, counts no dip and resumes no park.
+            // Nor does a window holding one of our own spikes: a cold path's tens of ms stretch its wall time into a
+            // dip of our own making.
             var game = 0.0;
             var wall = 0.0;
             if (lastRunMs > spikeMs) windowSpiked = true;
@@ -212,17 +171,20 @@ namespace IngameScript
                 windowGame = windowWall = 0.0;
                 windowSpiked = false;
             }
-            else if ((windowGame += dtSeconds) >= SimWindowSec)
+            else
             {
-                if (!windowSpiked)
+                windowGame += dtSeconds;
+                if ((windowWall += wallSeconds) >= SimWindowSec)
                 {
-                    game = windowGame;
-                    wall = windowWall + wallSeconds;
+                    if (!windowSpiked)
+                    {
+                        game = windowGame;
+                        wall = windowWall;
+                    }
+                    windowGame = windowWall = 0.0;
+                    windowSpiked = false;
                 }
-                windowGame = windowWall = 0.0;
-                windowSpiked = false;
             }
-            else windowWall += wallSeconds;
             if (wall > 0.0)
             {
                 var simEstimate = game / wall;
@@ -236,9 +198,8 @@ namespace IngameScript
                     simWarySec = SimWaryWindowSec;
                     if (simParked || simDipCount >= ParkDips)
                     {
-                        // Seed the averages so their ratio equals the dip on the parking transition: the pre-dip
-                        // average is stale "healthy" history that would resume us immediately — recovery must be
-                        // demonstrated from the dip onward.
+                        // Seed the averages at the dip: the pre-dip history would resume us at once, and recovery
+                        // must be shown from the dip onward.
                         if (!simParked) { simGameAvg = simEstimate; simWallAvg = 1.0; }
                         simParked = true;
                     }
@@ -246,18 +207,13 @@ namespace IngameScript
                 else if (SimAvg > resumeSim) simParked = false;
             }
 
-            // A heavy WE fired last tick extends the refractory in proportion to its measured cost, so an
-            // expensive transfer self-paces (this only spaces the next heavy — it never shrinks the cadence). Past
-            // the spike bar the cost is a cold path, not the network, and the spike pacing spaces it; scaling the
-            // refractory by it only pushed the next cold path past the limiter's startup grace.
+            // Past the spike bar the cost is a cold path, not the network, and spike pacing spaces it; scaling the
+            // refractory by it would push the next cold path past the limiter's startup allowance.
             if (firedLastTick) holdSec = Higher(holdSec, BaseHoldSec + (lastRunMs < spikeMs ? lastRunMs : spikeMs) * HoldScalePerMs);
-            // A breach on a working tick arms the de-cluster back-off — whether WE fired the heavy or an external
-            // stall landed on a cheap tick (indistinguishable from the sandbox). Sub-breach runs are left alone:
-            // they are never offenses, so backing off on them only throws away throughput. Idle spikes are
-            // excluded too — a pause while parked is noise, not deferrable work. Either sim reading below the
-            // back-off bar counts: the newest sample sees a lag onset first, the average a recovery not yet
-            // complete. A bar of 1 is checked outright: an unclamped sample can read over 1 at full speed. The
-            // run is charged at the lower of the two readings, capped at full speed, as the limiter divides by sim.
+            // Idle breaches are excluded: a pause while parked is noise, not deferrable work. Either sim reading below
+            // the back-off bar counts — the instant sees a lag onset first, the average an unfinished recovery. A bar
+            // of 1 is checked outright, since an unclamped sample can read over 1 at full speed. The run is charged
+            // ÷ the lower reading, capped at 1, as the limiter divides by sim.
             var sim = simInstant < SimAvg ? simInstant : SimAvg;
             if (workPending && lastRunMs > breachMs * (sim < 1.0 ? sim : 1.0)
                 && (backoffSim >= 1.0 || simInstant < backoffSim || SimAvg < backoffSim)) ArmBackoff();
@@ -276,9 +232,7 @@ namespace IngameScript
             AllowHeavy = !simParked && simDipCount < WaryDips && holdSec <= 0.0 && backoffSec <= 0.0 && standDownSec <= 0.0 && spikeSec <= 0.0;
         }
 
-        // Arm (or escalate) the cadence back-off after a breach. A fresh engagement opens a new window (and
-        // resets the escalation count); a second breach inside the still-open window escalates it. One breach →
-        // Recovering (~10x fewer runs); a second inside the window → Parked (~100x fewer).
+        // A fresh engagement opens a new window; a second breach inside it escalates from Recovering to Parked.
         void ArmBackoff()
         {
             if (backoffSec <= 0.0) { Backoffs++; windowBreaches = 0; }
@@ -286,23 +240,21 @@ namespace IngameScript
             backoffSec = Higher(backoffSec, BreachBackoffSec);
         }
 
-        // End of the tick, with the now-current backlog state: pick the next wake cadence. Only safety states park;
-        // no backlog is Idle, still frequent enough that a trickle of moves and background discovery work advance
-        // in seconds and need no cadence floating of their own. The safety checks outrank the backlog check so an
-        // escalated back-off parks even when a backlog is draining.
+        // Idle is frequent enough that a trickle of moves and background discovery advance in seconds with no cadence
+        // of their own. Safety checks come first, so an escalated back-off parks even while a backlog drains.
         public Cadence NextCadence(bool backlog)
         {
             if (Halted || simParked) return Cadence.Parked;
-            // These holds only keep heavy calls back. Their cheap runs at U10 push a slow run out of the limiter's
-            // 50-run average within seconds; at U100 it stayed there over a minute and drew an average offense.
+            // These holds only keep heavies back, so they wake at U10: cheap runs flush a slow run out of the limiter's
+            // rolling average in seconds, where at U100 it lingers over a minute and can draw an average offense.
             if (standDownSec > 0.0 || spikeSec > 0.0) return Cadence.Recovering;
             if (backoffSec > 0.0) return windowBreaches >= 2 ? Cadence.Parked : Cadence.Recovering;
             if (simDipCount >= WaryDips) return Cadence.Recovering;
             return backlog ? Cadence.Working : Cadence.Idle;
         }
 
-        // Arm the refractory the instant a heavy call is dispatched (before its cost is known), so neither the rest of
-        // this tick nor the very next one can fire a second; Observe then lengthens it once the measured cost arrives.
+        // Armed before the cost is known, so neither the rest of this tick nor the next can fire a second; Observe
+        // lengthens it once the cost arrives.
         public void NotifyHeavyFired()
         {
             firedLastTick = true;
@@ -310,17 +262,14 @@ namespace IngameScript
             AllowHeavy = false;
         }
 
-        // The limiter fired the cooperative GracefulShutDown:: argument — it is about to punish us. Hold every
-        // heavy call and park long enough for the offense count to age out. The immediate
-        // AllowHeavy=false covers the gap until the next Observe.
+        // The limiter's cooperative GracefulShutDown:: signal: the next offense punishes. AllowHeavy=false covers the
+        // gap until the next Observe.
         public void StandDown()
         {
             standDownSec = Higher(standDownSec, StandDownSec);
             AllowHeavy = false;
         }
 
-        // A step threw. Arm a back-off so the scheduler cannot fast-loop the crashing step; enough of these with no
-        // clean run between opens the breaker (Halted → parked). NotifyCleanRun closes it again.
         public void NotifyCrash()
         {
             consecutiveCrashes++;
@@ -328,11 +277,10 @@ namespace IngameScript
             AllowHeavy = false;
         }
 
-        // A tick completed without throwing — the crashing step (if any) has recovered, so close the breaker. Only
-        // total, uninterrupted failure accumulates to Halted; an isolated crash is handled by the back-off alone.
+        // Only uninterrupted failure accumulates to Halted; an isolated crash is handled by the back-off alone.
         public void NotifyCleanRun() => consecutiveCrashes = 0;
 
-        // Measurement counters, not live control state, so the refractory/back-off/stand-down timers are untouched.
+        // Measurement counters only; the control timers are untouched.
         public void ResetCounters()
         {
             Backoffs = 0;

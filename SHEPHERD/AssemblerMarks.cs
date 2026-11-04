@@ -3,12 +3,11 @@ using System.Text;
 
 namespace IngameScript
 {
-    // The assembler tags [SHEPHERD-Main] and [SHEPHERD-Coop]. None = untagged: SHEPHERD never queues on it.
+    // None = untagged: SHEPHERD never queues on it.
     public enum AssemblerMark { None, Main, Coop }
 
-    // What the mark check reads per assembler. Construct is the managed-scope index (0 = home, >0 = docked).
-    // CanCooperate = the model has the game's cooperative switch. IsReceiver is the check's verdict: whether
-    // SHEPHERD may queue on this assembler.
+    // Construct: 0 = home, >0 = docked. CanCooperate = the model has the game's cooperative switch. IsReceiver is
+    // the mark check's verdict: whether SHEPHERD may queue on it.
     public interface IMarkedAssembler
     {
         long Id { get; }
@@ -22,12 +21,10 @@ namespace IngameScript
         void SetCooperative(bool on, bool dry);
     }
 
-    // Checks the marks per construct and decides which assemblers take orders. A construct is valid with exactly one
-    // Main (any number of Coop), or with neither; a Coop without a Main or several Mains is the player's to fix, so
-    // the construct gets no new work until then. A Coop whose model can't cooperate would sit idle, so it takes
-    // orders like a Main and doesn't count as one. The cooperative switch is set to match the mark only at home: a
-    // docked block's settings leave with its pilot, so a docked mismatch is reported instead and holds the construct.
-    // The disassembling Coop is left as the craft planner set it: its switch is off while it drains.
+    // A construct with several Mains, or Coops without a Main, is the player's to fix, so it gets no new work until
+    // then. A Coop whose model can't cooperate would sit idle, so it takes orders like a Main without counting as one.
+    // The switch is written only at home: a docked block's settings leave with its pilot, so a docked mismatch is
+    // reported and holds the construct. The disassembling Coop's switch is the craft planner's: off while it drains.
     public class MarkCheck
     {
         const int ListedNames = 3;

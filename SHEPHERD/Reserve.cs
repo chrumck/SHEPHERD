@@ -7,16 +7,15 @@ namespace IngameScript
     //   100M -> Min    (keep >= target; the surplus leaves only to fill another pool's shortfall)
     //   100L -> Limit  (moves as Exact; with A it only disassembles, never assembles)
     //   All  -> All    (fill with everything available, never remove; Target unused)
-    // Limit pulls, unlike the established sorters' remove-only L: a reserve container takes items only through its
-    // own pull, so a remove-only quota would sit below target while the grid held plenty.
+    // Limit pulls, unlike the usual remove-only L: a reserve container takes items only through its own pull, so a
+    // remove-only quota would sit below target while the grid held plenty.
     public enum QuotaMode { Exact, Min, Limit, All }
 
     public struct Quota
     {
         public QuotaMode Mode;
         public double Target;
-        // A trailing 'A' on the quota value: authorizes automatic production/disassembly toward the target. An
-        // independent flag on top of the mode, not a fifth mode — the move semantics stay exactly the mode's.
+        // A trailing 'A': a flag on top of the mode, which keeps its move semantics.
         public bool AutomaticProduction;
 
         public static bool TryParse(string value, out Quota quota)
@@ -45,10 +44,8 @@ namespace IngameScript
             if (last == 'M' || last == 'm') { mode = QuotaMode.Min; s = s.Cut(0, s.Length - 1); }
             else if (last == 'L' || last == 'l') { mode = QuotaMode.Limit; s = s.Cut(0, s.Length - 1); }
 
-            // Plain TryParse: SE runs PB scripts under InvariantCulture, so '.' is the decimal separator in-game
-            // whatever the server locale (tests pin invariant to match — see Tests & profiling). To pass a culture/
-            // NumberStyles explicitly you'd fully-qualify System.Globalization.* (no `using` in the PB preamble, and
-            // the packer strips usings — a fully-qualified reference needs none), but plain parse is correct + leaner.
+            // Plain TryParse: SE runs PB scripts under InvariantCulture, so '.' is the decimal separator whatever the
+            // server locale.
             double target;
             if (!double.TryParse(s.Trim(), out target)) return false;
             if (target < 0) return false;
@@ -69,10 +66,8 @@ namespace IngameScript
             amount + (Mode == QuotaMode.Min ? "M" : Mode == QuotaMode.Limit ? "L" : "") + (AutomaticProduction ? "A" : "");
     }
 
-    // A named reserve pool: the quotas declared for it plus a per-item running count, both keyed by the item key
-    // (Category.Key). The count is a per-cycle snapshot (tallied across the ledger walk's ticks and swapped in whole,
-    // kept live within the cycle by TookIn on each committed move in) so the intake can self-limit on counts, which
-    // volume-based checks can't. Pure (no game types) so the whole self-limiting model is unit-tested offline.
+    // The count is a per-cycle snapshot kept live within the cycle by TookIn/TookOut, so the intake can self-limit on
+    // counts, which volume checks can't.
     public partial class ReservePool
     {
         public readonly string Name;
@@ -93,16 +88,13 @@ namespace IngameScript
         // ledger walks every pool's quotas when planning.
         public Dictionary<string, Quota> Quotas => quotas;
 
-        // The distinct categories of this pool's quota items, so a ReserveIntake registers under them in the
-        // routing index. Computed once after quotas are loaded (configReload), not per cycle. Key form: ShortTypeId/Sub.
         public string[] Categories => categories;
 
         // Lookups use the prefix-free key, so a hand-written MyObjectBuilder_ key is normalized here or it never matches.
         public void SetQuota(string key, Quota quota) => quotas[Category.ShortTypeId(key)] = quota;
 
-        // Honors the category overrides so a pool's intake registers under the same category the sort routes a
-        // stack by — else an overridden quota item would route to its override category while the intake sat under
-        // the coarse one, and the reserve would never pull it.
+        // Honors the category overrides, else an overridden quota item would route to its override category while the
+        // intake sat under the built-in one, and the reserve would never pull it.
         public void RecomputeCategories(CategoryOverrides overrides)
         {
             var set = new List<string>();
@@ -125,13 +117,10 @@ namespace IngameScript
             return true;
         }
 
-        // Per-item units in the pool's containers. For an unconfigured pool this holds every item present, so its
-        // levels LCD can list the keys the user needs to write quotas.
+        // An unconfigured pool counts every item present, so its levels LCD can list the keys the user needs for quotas.
         public Dictionary<string, double> Counts => counts;
 
-        // The recount spans several ticks, and a render between them must not show a half-counted pool: it builds
-        // aside and replaces the live count in one swap. Only quota items count for a configured pool (the rest are
-        // irrelevant to the deficit); everything counts for an unconfigured one, so its levels LCD can list them.
+        // The recount spans several ticks, so it builds aside and swaps in whole: a render never shows a half-counted pool.
         public void BeginTally() => tally.Empty();
 
         public void Tally(string key, double amount)
@@ -155,8 +144,6 @@ namespace IngameScript
             counts[key] = (counts.Get(key, out have) ? have : 0) + amount;
         }
 
-        // Drop the count when the excess of an over-target item is drained out, so a sibling container in the same
-        // pool sees the reduced excess within the cycle. Clamped at 0; a fresh recount next cycle corrects drift.
         public void TookOut(string key, double amount)
         {
             double have;
@@ -164,8 +151,6 @@ namespace IngameScript
             counts[key] = left < 0 ? 0 : left;
         }
 
-        // How many more units the pool wants of this item right now (0 if no quota; a large sentinel for All so it
-        // always pulls whatever is available elsewhere).
         public double Deficit(string key)
         {
             Quota q;
@@ -176,10 +161,8 @@ namespace IngameScript
             return have < q.Target ? q.Target - have : 0;
         }
 
-        // How many units are over target and may leave (0 if no quota, or an All item, which never lets one go). A
-        // Min surplus counts too, though only another pool's intake may take it: the production ledger already sums
-        // every pool's targets against grid-wide stock, so a surplus held back here would leave a short pool that
-        // nothing crafts for.
+        // A Min surplus counts too, though only another pool's intake may take it: the production ledger sums every
+        // pool's targets against grid-wide stock, so a surplus held back here would leave a short pool nothing crafts for.
         public double Excess(string key)
         {
             Quota q;
@@ -190,9 +173,7 @@ namespace IngameScript
             return have > q.Target ? have - q.Target : 0;
         }
 
-        // Aggregate quota fill for the status readout: total units held / total finite target across this pool's
-        // Exact/Min/Limit quotas (All-mode carries no target, so it is excluded). fraction can exceed 1 when the
-        // pool is stocked above quota. Returns false when the pool has no finite target (only All-mode).
+        // fraction exceeds 1 when the pool is stocked above quota.
         public bool TryQuotaFill(out double fraction)
         {
             var have = 0.0;
