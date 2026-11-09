@@ -133,11 +133,11 @@ makes a status light instead (item 6), as many as you like.
    a category with no container (the status panel already shows `──no route──`), and `no run for 12.3 s (wall
    12.5 s)` when the server left the block unrun for over 5 s of game time (after a restart or a login, until the owner
    has finished loading in, or while the owner's grids were frozen offline).
-   `slow (othr sort+status 2.104ms 1834i) +33s`, or `throttling U10 (…)` once it backs off, is a run over `peakMs`: the
-   `[SHEPHERD-DEBUG]` row it counts in, what that run did (its job — `sort`, `bottle`, `craft`, `ledger`, `fetch`,
-   `scan`, `build`, `plan`, `learn`, `probe`, `scope`, `standby` or a command — the panel it drew, `beat` for the
-   heartbeat to other SHEPHERD blocks, `none` for nothing), its time, how many of the block's instructions it used, and
-   the seconds since the start.
+   `slow (othr sort+status 2.104ms 1834i sim 0.98) +33s`, or `throttling U10 (…)` once it backs off, is a run over
+   `peakMs`: the `[SHEPHERD-DEBUG]` row it counts in, what that run did (its job — `sort`, `bottle`, `craft`,
+   `ledger`, `fetch`, `scan`, `build`, `plan`, `learn`, `probe`, `scope`, `standby` or a command — the panel it drew,
+   `beat` for the heartbeat to other SHEPHERD blocks, `none` for nothing), its time, how many of the block's
+   instructions it used, the sim speed SHEPHERD last measured, and the seconds since the start.
    `warmed up +14s` marks the end of a start's slow first runs, the seconds since the start. Leave the grid loaded
    until it appears: logging off earlier freezes the rest of them until you are back, when they draw limiter warnings.
 3. **`[SHEPHERD-DEBUG]` — run times.** Peak and rolling-average run time against the server's limits,
@@ -161,7 +161,7 @@ makes a status light instead (item 6), as many as you like.
     Iron            12.3k/All
    ```
 5. **`[SHEPHERD:Ores,Ingots]` — stock.** Every item of those categories on the grid (containers, machine
-   inputs, docked ships it unloads) with how many you have. `*` adds what your catch-all containers hold.
+   inputs, docked cargo it unloads) with how many you have. `*` adds what your catch-all containers hold.
    Refreshes once per sort cycle, so on a busy grid it can lag a minute or more.
    ```
    Tools · 3 items
@@ -203,6 +203,7 @@ back. Keys are case-sensitive. Run `configReload` after editing.
 | `factionShare` | `false` | | Also manage blocks other players shared with your faction. |
 | `dockedProduction` | `false` | | Also feed, harvest and queue a docked ship's refineries and assemblers (crafting only — never disassembly). |
 | `dockedFuel` | `false` | | Also top up a docked ship's reactors and generators (never empties them). |
+| `autoUnloadShip` | `false` | | Unload every docked ship whenever it docks, not only on `unloadShip`. |
 | `peakMs` | `1.5` | 0.001–1000 | A run longer than this backs SHEPHERD off, its time divided by sim speed as the limiter counts it; set it to your server's per-run limit. |
 | `parkSim` | `0.75` | 0–0.99 | Park while sim speed keeps dropping below this. `0` = never park. |
 | `resumeSim` | `0.8` | up to 1 | Resume once average sim speed is back above this. Must be ≥ `parkSim`, or both revert. |
@@ -471,12 +472,17 @@ perfect, so sanity-check a new `[Yields]` line.
 SHEPHERD manages its own grid (rotors, pistons, hinges included) and **your** ships docked by connector,
 chains included.
 
-1. **Unloaded:** cargo, cockpits, connectors, drills, grinders and collectors are emptied into the
-   base — everything except reserve stock and `[SHEPHERD-Off]` blocks. A docked container's `[SHEPHERD:…]`
-   tag is ignored while docked.
+1. **Unloaded on request:** run `unloadShip` and every ship docked at that moment has its cargo, cockpits,
+   connectors, drills, grinders and collectors emptied into the base, once — everything except reserve stock and
+   `[SHEPHERD-Off]` blocks. Each ship is then left alone until the next `unloadShip`; one that undocks first is
+   dropped. The log says `unloaded <ship>` when one sort pass has been through all of its cargo; anything the base
+   had no room for stays aboard. With `autoUnloadShip=true` every docked ship unloads whenever it is docked. A
+   docked **station** (a static grid) always unloads. A docked container's `[SHEPHERD:…]` tag is ignored while
+   docked.
 2. **Resupplied:** docked reserve containers are filled to their pool's quotas from the **base's** Custom
    Data, so a ship needs no SHEPHERD of its own. Pool names are shared across the docked group — give ship
-   loadouts their own names. A ship pool with no section on the base is left alone.
+   loadouts their own names. A ship pool with no section on the base is left alone. This needs no
+   `unloadShip`.
 3. **Left alone:** gas tanks; reactors and generators unless `dockedFuel=true`; refineries and assemblers
    unless `dockedProduction=true` (the ship then needs its own `Main` — **Assembler modes**). A docked
    block's Use Conveyor System and Cooperative mode are never changed.
@@ -491,7 +497,7 @@ Docking and undocking are picked up within seconds (`docking changed - rescannin
 ## Several SHEPHERD programmable blocks
 
 Among one owner's SHEPHERD blocks on a ship or docked group, one leads and the rest **stand by** (move
-nothing; commands other than `learn` still work). A docked ship hands over to the base and takes over again ~10 s after
+nothing; commands other than `learn` and `unloadShip` still work). A docked ship hands over to the base and takes over again ~10 s after
 undocking. A block started while docked runs one scan before it stands by. Another player's SHEPHERD, or one beyond a `[SHEPHERD-Split]`, runs on its own.
 
 Who leads: highest `priority`, then station over ship, then large grid over small, then a fixed pick. A
@@ -515,10 +521,11 @@ Run the programmable block with one of these arguments (case-sensitive):
 | `configReload` | Re-reads Custom Data (settings, quotas, categories, learned facts) and shows what it read. Needed after every edit. |
 | `learn` | Enters learn mode; run again to save and resume. |
 | `statsReset` | Restarts the `[SHEPHERD-DEBUG]` measurement window. |
+| `unloadShip` | Unloads every ship docked now, once (**Docked ships**). |
 
 `[SHEPHERD-DEBUG]` rows: `ftch` block sweep · `scan` block classify · `bld` sort-plan build · `xfer` item
-transfer · `plan` production plan · `save` writing Custom Data · `cmd` these commands · `othr` the rest
-(finding the next move, bottle steps, drawing panels).
+transfer · `fill` a gas tank filling bottles · `plan` production plan · `save` writing Custom Data · `cmd` these
+commands · `othr` the rest (finding the next move, drawing panels).
 To check server-legality: let the grid settle, `statsReset`, wait a while, read `peak` and each row's
 `max`.
 

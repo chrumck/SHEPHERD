@@ -17,10 +17,13 @@ namespace IngameScript
 
         public bool DockedProduction;
         public bool DockedFuel;
+        public bool AutoUnload;
+        // The ships unloadShip marked: each leaves once a sort lap has walked its cargo, or when it undocks.
+        public readonly List<IMyCubeGrid> Unloading = new List<IMyCubeGrid>();
         public int Count => constructs.Count;
 
         public void Build(List<IMyShipConnector> connectors, IMyCubeGrid home, long ownerId, bool shareWithFaction,
-            bool dockedProduction, bool dockedFuel)
+            bool dockedProduction, bool dockedFuel, bool autoUnload)
         {
             constructs.Empty();
             edgeA.Empty();
@@ -29,6 +32,7 @@ namespace IngameScript
             factionShare = shareWithFaction;
             DockedProduction = dockedProduction;
             DockedFuel = dockedFuel;
+            AutoUnload = autoUnload;
             constructs.Push(home);
             foreach (var c in connectors)
             {
@@ -52,6 +56,26 @@ namespace IngameScript
                     grew = true;
                 }
             }
+            for (var i = Unloading.Count - 1; i >= 0; i--)
+                if (IndexOf(Unloading[i]) < 1) Unloading.RemoveAt(i);
+        }
+
+        // Marks every ship docked now, an unloaded one again too. A station's cargo unloads anyway.
+        public int MarkShips()
+        {
+            Unloading.Empty();
+            for (var i = 1; i < constructs.Count; i++)
+                if (!constructs[i].IsStatic) Unloading.Push(constructs[i]);
+            return Unloading.Count;
+        }
+
+        // For a docked construct: a ship's cargo is the pilot's until unloadShip marks it, unless autoUnloadShip.
+        public bool KeepsCargo(int at)
+        {
+            if (AutoUnload || constructs[at].IsStatic) return false;
+            foreach (var g in Unloading)
+                if (g.IsSameConstructAs(constructs[at])) return false;
+            return true;
         }
 
         // 0 = home, above 0 = docked, -1 = outside the scope (or no scope built yet).

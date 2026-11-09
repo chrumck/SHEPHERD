@@ -395,8 +395,9 @@ namespace IngameScript
 
             var role = Roles.Of(block);
             // A docked ship's fuel and production stay the pilot's unless a setting opts in: whatever SHEPHERD drained,
-            // fed or switched would leave with the ship.
-            if (!home && (role == Role.Consumer && !scope.DockedFuel || role == Role.Processor && !scope.DockedProduction)) return;
+            // fed or switched would leave with the ship. Its cargo too, until an unload: its reserves still fill.
+            if (!home && (role == Role.Consumer && !scope.DockedFuel || role == Role.Processor && !scope.DockedProduction
+                || role < Role.Consumer && !tag.IsReserve && scope.KeepsCargo(at))) return;
             var output = role == Role.Processor ? block.GetInventory(1) : null;
             result.Managed.Push(new ManagedBlock
             {

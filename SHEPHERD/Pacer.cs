@@ -49,10 +49,10 @@ namespace IngameScript
         // information, and taken as one it would crater the average for tens of seconds or park on its own. Its
         // sample window is dropped whole; checked per tick so a freeze is caught at the same length whatever the window.
         const double SimFloor = 0.02;
-        // Wall time, as the limiter's sim (physics steps in the last second) counts it. A fifth of its second, so lag is
-        // met before the limiter's own reading has fallen; one late server tick reads as a dip only past ~67 ms, where
-        // over three ticks one past ~33 ms did, at a healthy sim. From Update100 each tick is a sample.
-        const double SimWindowSec = 0.2;
+        // Wall time, as the limiter's sim (physics steps in the last second) counts it. A tenth of its second, so a
+        // short hitch is seen while it lasts. The cost: at a healthy sim one server tick ~30 ms late already reads as a
+        // dip, and two in the sliding window go wary. From Update10 each tick is a sample.
+        const double SimWindowSec = 0.1;
         const double SimAvgTauSec = 12.0;    // the average's time constant: resume takes roughly this long of healthy sim
         // Much shorter than the recurrence interval of isolated dips, so unrelated dips never chain toward a park.
         // Sliding: each dip refreshes it, and its expiry forgets all counted dips.

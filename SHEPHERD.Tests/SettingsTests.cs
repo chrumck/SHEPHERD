@@ -16,6 +16,31 @@ namespace SHEPHERD.Tests
         }
 
         [Fact]
+        public void UnloadShipUnloadsEachDockedShipOnceThenLeavesItAlone()
+        {
+            List<string> log;
+            var h = Base("", out log);
+            h.Dock(h.Home, ProgramHarness.Grid("Miner", false, false));
+            h.Tick(300);
+            Assert.DoesNotContain(log, frame => frame.Contains("unloaded Miner"));
+            h.Command("unloadShip");
+            Assert.Contains("unloading 1 ship", h.Echo);
+            h.TickUntil(() => log.Count > 0 && log[log.Count - 1].Contains("unloaded Miner"));
+            h.Command("unloadShip");
+            Assert.Contains("unloading 1 ship", h.Echo);
+        }
+
+        [Fact]
+        public void UnloadShipFindsNoShipBesideAStation()
+        {
+            List<string> log;
+            var h = Base("", out log);
+            h.Dock(h.Home, ProgramHarness.Grid("Outpost", true, true));
+            h.Command("unloadShip");
+            Assert.Contains("no ship docked", h.Echo);
+        }
+
+        [Fact]
         public void AnEmptyCustomDataGetsEverySettingWithItsDefaultInTheGuidesOrder()
         {
             List<string> log;
@@ -23,7 +48,7 @@ namespace SHEPHERD.Tests
             h.TickUntil(() => h.CustomData.Contains("statusWrapChars"));
             Assert.Equal("[Settings]\nutcOffsetHours=0\nreactorFillPct=15\ngasGenFillPct=50\nrefineryFillPct=30\n"
                 + "bottleSweepMinutes=3\nsortPassSeconds=60\npriority=0\nfactionShare=false\ndockedProduction=false\n"
-                + "dockedFuel=false\npeakMs=1.5\nparkSim=0.75\nresumeSim=0.8\nbackoffSim=1\nspikeMs=8\n"
+                + "dockedFuel=false\nautoUnloadShip=false\npeakMs=1.5\nparkSim=0.75\nresumeSim=0.8\nbackoffSim=1\nspikeMs=8\n"
                 + "spikeWindowSeconds=10.5\nstartupSeconds=45\nstatusWrapChars=40\n",
                 h.CustomData.Substring(h.CustomData.IndexOf("[Settings]")).Replace("\r", ""));
         }
@@ -34,10 +59,10 @@ namespace SHEPHERD.Tests
             List<string> log;
             var h = Base("[Settings]\nutcOffsetHours=-3\nreactorFillPct=20\ngasGenFillPct=40\nrefineryFillPct=35\n"
                 + "bottleSweepMinutes=0\nsortPassSeconds=90\npriority=-2\nfactionShare=true\ndockedProduction=False\n"
-                + "dockedFuel=TRUE\npeakMs=1.2\nparkSim=0.6\nresumeSim=0.7\nbackoffSim=0.95\nspikeMs=7\n"
+                + "dockedFuel=TRUE\nautoUnloadShip=true\npeakMs=1.2\nparkSim=0.6\nresumeSim=0.7\nbackoffSim=0.95\nspikeMs=7\n"
                 + "spikeWindowSeconds=12\nstartupSeconds=30\nstatusWrapChars=32\n", out log);
             h.Command("configReload");
-            Assert.EndsWith("\npriority -2, factionShare, dockedFuel"
+            Assert.EndsWith("\npriority -2, factionShare, dockedFuel, autoUnloadShip"
                 + "\npeakMs 1.2, parkSim 0.6, resumeSim 0.7, backoffSim 0.95"
                 + "\nspikeMs 7, spikeWindowSeconds 12, startupSeconds 30"
                 + "\nfill % 20/40/35, bottles 0 min, pass 90 s, UTC-3, wrap 32", h.Echo.TrimEnd());

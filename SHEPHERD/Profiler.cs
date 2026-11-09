@@ -28,6 +28,7 @@ namespace IngameScript
             Row(sb, stats, RunKind.Scan);
             Row(sb, stats, RunKind.Build);
             Row(sb, stats, RunKind.Transfer);
+            Row(sb, stats, RunKind.Fill);
             Row(sb, stats, RunKind.Plan);
             Row(sb, stats, RunKind.Save);
             Row(sb, stats, RunKind.Command);
@@ -35,7 +36,7 @@ namespace IngameScript
         }
 
         // Indexed by RunKind, so the order follows the enum. Also names the run in the throttle log line.
-        static readonly string[] Tags = { "othr", "scan", "xfer", "ftch", "plan", "save", "cmd", "bld" };
+        static readonly string[] Tags = { "othr", "scan", "xfer", "ftch", "plan", "save", "cmd", "bld", "fill" };
 
         public static string Tag(RunKind kind) => Tags[(int)kind];
 

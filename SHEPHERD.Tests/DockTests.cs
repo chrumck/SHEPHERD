@@ -17,10 +17,11 @@ namespace SHEPHERD.Tests
 
         // A grid on construct `construct`. IsSameConstructAs compares construct numbers, carried in the EntityId's
         // thousands so every grid stays distinct.
-        static IMyCubeGrid Grid(int construct)
+        static IMyCubeGrid Grid(int construct, bool isStatic = false)
         {
             var g = new Mock<IMyCubeGrid>();
             g.SetupGet(x => x.EntityId).Returns(construct * 1000L + Interlocked.Increment(ref nextGrid) % 1000);
+            g.SetupGet(x => x.IsStatic).Returns(isStatic);
             g.Setup(x => x.IsSameConstructAs(It.IsAny<IMyCubeGrid>()))
              .Returns((IMyCubeGrid other) => other != null && other.EntityId / 1000 == construct);
             return g.Object;
@@ -52,12 +53,12 @@ namespace SHEPHERD.Tests
         }
 
         static ManagedScope ScopeOf(IMyCubeGrid home, IEnumerable<Mock<IMyShipConnector>> connectors,
-            bool factionShare = false, bool dockedProduction = false, bool dockedFuel = false)
+            bool factionShare = false, bool dockedProduction = false, bool dockedFuel = false, bool autoUnload = false)
         {
             var list = new List<IMyShipConnector>();
             foreach (var c in connectors) list.Add(c.Object);
             var scope = new ManagedScope();
-            scope.Build(list, home, Me, factionShare, dockedProduction, dockedFuel);
+            scope.Build(list, home, Me, factionShare, dockedProduction, dockedFuel, autoUnload);
             return scope;
         }
 
@@ -209,7 +210,7 @@ namespace SHEPHERD.Tests
                 Cargo(home, "Ores [SHEPHERD:Ores]"),
                 Cargo(ship, "Ship Ores [SHEPHERD:Ores]"),
                 Cargo(ship, "Ship Hold"),
-            }, Scope(home, Dock(home, ship)));
+            }, ScopeOf(home, Dock(home, ship), autoUnload: true));
             Assert.Single(scan.Destinations);
             Assert.Equal("Ores [SHEPHERD:Ores]", scan.Destinations[0].Name);
             Assert.Equal(3, scan.Managed.Count);
@@ -218,6 +219,62 @@ namespace SHEPHERD.Tests
             Assert.True(scan.Managed[2].Docked);
             Assert.Equal(0, scan.Managed[0].Construct);
             Assert.Equal(1, scan.Managed[1].Construct);
+        }
+
+        [Fact]
+        public void AShipKeepsItsCargoButItsReserveStillFills()
+        {
+            var home = Grid(1);
+            var ship = Grid(2);
+            var scan = Scan.Classify(new[]
+            {
+                Cargo(ship, "Ship Hold"),
+                On<IMyShipDrill>(ship, "Drill").Object,
+                On<IMyCockpit>(ship, "Cockpit").Object,
+                Cargo(ship, "Locker [SHEPHERD-RESERVE:Ship]"),
+            }, Scope(home, Dock(home, ship)));
+            Assert.Equal("Locker [SHEPHERD-RESERVE:Ship]", Assert.Single(scan.Managed).Block.CustomName);
+            Assert.Single(scan.Reserves);
+        }
+
+        [Fact]
+        public void ADockedStationAlwaysUnloads()
+        {
+            var home = Grid(1);
+            var station = Grid(2, true);
+            var scan = Scan.Classify(new[] { Cargo(station, "Hold") }, Scope(home, Dock(home, station)));
+            Assert.True(Assert.Single(scan.Managed).Docked);
+        }
+
+        [Fact]
+        public void UnloadShipMarksOnlyTheShipsDockedNow()
+        {
+            var home = Grid(1);
+            var ship = Grid(2);
+            var station = Grid(3, true);
+            var scope = Scope(home, Dock(home, ship), Dock(home, station));
+            Assert.Equal(1, scope.MarkShips());
+            Assert.False(scope.KeepsCargo(scope.IndexOf(ship)));
+            var later = Grid(4);
+            var connectors = new List<Mock<IMyShipConnector>>();
+            connectors.AddRange(Dock(home, ship));
+            connectors.AddRange(Dock(home, later));
+            var list = new List<IMyShipConnector>();
+            foreach (var c in connectors) list.Add(c.Object);
+            scope.Build(list, home, Me, false, false, false, false);
+            Assert.False(scope.KeepsCargo(scope.IndexOf(ship)));
+            Assert.True(scope.KeepsCargo(scope.IndexOf(later)));
+        }
+
+        [Fact]
+        public void AnUndockedShipLeavesTheUnloadForGood()
+        {
+            var home = Grid(1);
+            var ship = Grid(2);
+            var scope = Scope(home, Dock(home, ship));
+            scope.MarkShips();
+            scope.Build(new List<IMyShipConnector>(), home, Me, false, false, false, false);
+            Assert.Empty(scope.Unloading);
         }
 
         [Fact]
@@ -254,7 +311,7 @@ namespace SHEPHERD.Tests
                 On<IMyAssembler>(ship, "Assembler").Object,
                 On<IMyGasTank>(ship, "Tank").Object,
                 On<IMyShipDrill>(ship, "Drill").Object,
-            }, Scope(home, Dock(home, ship)));
+            }, ScopeOf(home, Dock(home, ship), autoUnload: true));
             Assert.Single(scan.Managed);
             Assert.Equal(Role.Collector, scan.Managed[0].Role);
             Assert.Empty(scan.Tanks);
@@ -339,7 +396,7 @@ namespace SHEPHERD.Tests
                 Cargo(guest, "Guest Hold", 99),
                 On<IMyTextPanel>(home, "Their Panel [SHEPHERD]", 99, false).Object,
                 Cargo(guest, "Unowned Hold"),
-            }, Scope(home, Dock(home, guest)));
+            }, ScopeOf(home, Dock(home, guest), autoUnload: true));
             Assert.Single(scan.Managed);
             Assert.Equal("Unowned Hold", scan.Managed[0].Block.CustomName);
             Assert.Empty(scan.Destinations);

@@ -2,7 +2,7 @@ namespace IngameScript
 {
     // Runs of very different cost are tallied apart. A PB can't read its own in-run time, so each sample is the
     // PREVIOUS run's ms, attributed to that run's kind. Command = a non-tick run (a command or the limiter's signal).
-    public enum RunKind { Other, Scan, Transfer, Fetch, Plan, Save, Command, Build }
+    public enum RunKind { Other, Scan, Transfer, Fetch, Plan, Save, Command, Build, Fill }
 
     public class RunStats
     {
@@ -10,7 +10,7 @@ namespace IngameScript
         // limiter this mean keeps GC-coincident runs and reads a touch high.
         const int WindowRuns = 50;
 
-        const int Kinds = 8;
+        const int Kinds = 9;
         readonly int[] runs = new int[Kinds];
         // Counts GC-coincident runs too, so it over-counts offenses — yet it is the one in-script measure of how often
         // stalls land.

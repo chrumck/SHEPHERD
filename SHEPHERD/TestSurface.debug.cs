@@ -52,7 +52,7 @@ namespace IngameScript
         public static ManagedScope Home(IMyCubeGrid home, long owner = 0)
         {
             var scope = new ManagedScope();
-            scope.Build(new List<IMyShipConnector>(), home, owner, false, false, false);
+            scope.Build(new List<IMyShipConnector>(), home, owner, false, false, false, false);
             return scope;
         }
     }

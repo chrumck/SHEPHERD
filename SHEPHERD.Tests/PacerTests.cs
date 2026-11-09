@@ -11,7 +11,7 @@ namespace SHEPHERD.Tests
         const double Tick = 1.0 / 60.0; // one Update1 tick of sim-time
         const double HealthySim = 1.0;  // comfortably above every sim threshold
         const double LaggedSim = 0.6;   // below the park bar — the limiter's enforcement window is near
-        const double Window = 0.2;      // a sim sample's wall time
+        const double Window = 0.1;      // a sim sample's wall time
         // Update1 ticks at a lagged sim until their wall time closes a window — fewer than a game-time window would take.
         static readonly int LaggedTicks = (int)System.Math.Floor(Window * LaggedSim / Tick) + 1;
         const double Breach = Pacer.DefaultPeakMs + 0.1; // a run over the peak bar at full speed
@@ -800,24 +800,30 @@ namespace SHEPHERD.Tests
             Assert.Equal(0, p.Backoffs);
         }
 
-        // Nine healthy ticks, then one server tick that took 60 ms of wall time where 16.7 were due.
-        const double SlowTickWall = 0.06;
-
-        static void WindowWithOneSlowTick(Pacer p)
+        // Five healthy ticks, then one server tick that took longer than the 16.7 ms due, closing the window.
+        static void WindowWithOneSlowTick(Pacer p, double slowTickWall)
         {
-            for (var i = 0; i < 9; i++) Observe(p, 0.0, Tick, true, HealthySim);
-            p.Observe(0.0, Tick, true, SlowTickWall, false);
+            for (var i = 0; i < 5; i++) Observe(p, 0.0, Tick, true, HealthySim);
+            p.Observe(0.0, Tick, true, slowTickWall, false);
         }
 
         [Fact]
         public void OneSlowTickInsideAWindowIsNotADip()
         {
             var p = new Pacer();
-            for (var i = 0; i < Pacer.ParkDips; i++) WindowWithOneSlowTick(p);
+            for (var i = 0; i < Pacer.ParkDips; i++) WindowWithOneSlowTick(p, 0.035);
             Assert.False(p.SimWary);
             Assert.False(p.SimParked);
-            Assert.Equal(10 * Tick / (9 * Tick + SlowTickWall), p.SimInstant, 6);
+            Assert.Equal(6 * Tick / (5 * Tick + 0.035), p.SimInstant, 6);
             Assert.Equal(0, p.Waries);
+        }
+
+        [Fact]
+        public void OneTickSixtyMsLateIsADip()
+        {
+            var p = new Pacer();
+            for (var i = 0; i < Pacer.WaryDips; i++) WindowWithOneSlowTick(p, 0.06);
+            Assert.True(p.SimWary);
         }
 
         [Fact]

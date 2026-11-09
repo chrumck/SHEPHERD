@@ -33,7 +33,7 @@ namespace SHEPHERD.Tests
             h.RunMs = 1.6;
             h.Tick();
             h.RunMs = 0.05;
-            Assert.Matches(@"slow \(\w+ " + Did + @" 1\.600ms \d+i\) \+\d+s$", LastLogged(h, log, "slow (").TrimEnd());
+            Assert.Matches(@"slow \(\w+ " + Did + @" 1\.600ms \d+i sim \d\.\d\d\) \+\d+s$", LastLogged(h, log, "slow (").TrimEnd());
         }
 
         [Fact]
@@ -63,7 +63,7 @@ namespace SHEPHERD.Tests
             h.RunMs = 1.6;
             h.Tick();
             h.RunMs = 0.05;
-            Assert.Matches(@"throttling U\d+ \(\w+ " + Did + @" 1\.600ms \d+i\) \+\d+s$", LastLogged(h, log, "throttling").TrimEnd());
+            Assert.Matches(@"throttling U\d+ \(\w+ " + Did + @" 1\.600ms \d+i sim \d\.\d\d\) \+\d+s$", LastLogged(h, log, "throttling").TrimEnd());
         }
 
         [Fact]
@@ -74,7 +74,7 @@ namespace SHEPHERD.Tests
             h.RunMs = 20.0;
             h.Tick();
             h.RunMs = 0.05;
-            Assert.Matches(@"throttling U\d+ \(\w+ " + Did + @" 20\.000ms \d+i\) \+\d+s$", LastLogged(h, log, "throttling").TrimEnd());
+            Assert.Matches(@"throttling U\d+ \(\w+ " + Did + @" 20\.000ms \d+i sim \d\.\d\d\) \+\d+s$", LastLogged(h, log, "throttling").TrimEnd());
         }
 
         // What a run did, as the slow and throttling lines name it: its job, the panel it drew and the heartbeat.
@@ -89,7 +89,7 @@ namespace SHEPHERD.Tests
             h.RunMs = 1.6;
             h.Tick();
             h.RunMs = 0.05;
-            Assert.Matches(@"slow \(cmd statsReset 1\.600ms \d+i\) \+\d+s$", LastLogged(h, log, "slow (").TrimEnd());
+            Assert.Matches(@"slow \(cmd statsReset 1\.600ms \d+i sim \d\.\d\d\) \+\d+s$", LastLogged(h, log, "slow (").TrimEnd());
         }
 
         static int TicksToFirstIdle(int instructions)

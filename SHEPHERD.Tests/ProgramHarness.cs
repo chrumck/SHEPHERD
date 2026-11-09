@@ -105,6 +105,7 @@ namespace SHEPHERD.Tests
 
         // Transfers out of AddStock containers and AddTank refills attempted, moved or not.
         public int EngineWrites;
+        public int Refills;
 
         double WakeSeconds()
         {
@@ -193,7 +194,7 @@ namespace SHEPHERD.Tests
             tank.SetupGet(t => t.FilledRatio).Returns(gas ? 1.0 : 0.0);
             tank.SetupGet(t => t.HasInventory).Returns(true);
             tank.SetupGet(t => t.InventoryCount).Returns(1);
-            tank.Setup(t => t.RefillBottles()).Callback(() => EngineWrites++);
+            tank.Setup(t => t.RefillBottles()).Callback(() => { EngineWrites++; Refills++; });
             tank.Setup(t => t.GetInventory(It.IsAny<int>())).Returns(inventory.Object);
             tank.Setup(t => t.GetInventory()).Returns(inventory.Object);
             Add(tank.Object);

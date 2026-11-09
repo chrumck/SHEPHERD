@@ -125,6 +125,7 @@ namespace SHEPHERD.Tests
             Assert.Contains("ftch x0", text);                 // untouched kinds still print a zero row
             Assert.Contains("save x0", text);
             Assert.Contains("bld x0", text);
+            Assert.Contains("fill x0", text);
         }
     }
 }

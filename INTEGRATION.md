@@ -54,6 +54,7 @@ program can take those jobs over:
 | `bottleSweepMinutes` | 3 | 0 or more | Minutes between bottle-refill sweeps. **0: SHEPHERD refills no bottles.** |
 | `dockedFuel` | false | | Also top up reactors and gas generators of docked grids. |
 | `dockedProduction` | false | | Also feed and queue on refineries and assemblers of docked grids. |
+| `autoUnloadShip` | false | | Unload docked ships' cargo whenever they are docked. **false: a ship's cargo is unloaded only by the `unloadShip` command** (A6), once. |
 
 With a fill % above 0, SHEPHERD turns off the conveyor auto-pull of each such machine on its own grid, so its fill
 amount holds.
@@ -126,8 +127,9 @@ A tag ends at the first `]`.
    past a connector tagged `[SHEPHERD-Split]` (either end of the pair).
 3. **Never managed:** weapons, parachute hatches and welders (they pull their own ammo, canvas and components), and
    blocks tagged `[SHEPHERD-Off]`. Gas tanks are used only to refill bottles.
-4. **Docked grids:** their cargo is unloaded home and their `[SHEPHERD-RESERVE…]` pools are filled; their
-   `[SHEPHERD:…]` tags are ignored. Their machines follow `dockedFuel` and `dockedProduction` (A2).
+4. **Docked grids:** their `[SHEPHERD-RESERVE…]` pools are filled and their `[SHEPHERD:…]` tags are ignored. A
+   docked station's (static grid's) cargo is unloaded home; a ship's only after `unloadShip` (A6) or with
+   `autoUnloadShip` (A2). Their machines follow `dockedFuel` and `dockedProduction` (A2).
 5. **Assemblers:** SHEPHERD queues only on `[SHEPHERD-Main]` (one per construct) and `[SHEPHERD-Coop]` assemblers,
    never on an untagged one. On its own construct it sets each tagged assembler's cooperative switch to match.
 
@@ -189,6 +191,7 @@ Run with the PB's Run action and an argument (the player must own the PB):
 1. `configReload` — re-read Custom Data. A save SHEPHERD still had pending is written first.
 2. `learn` — enter learn mode; run it again to save and leave.
 3. `statsReset` — zero the `[SHEPHERD-DEBUG]` figures.
+4. `unloadShip` — unload every ship docked now, once; each is left alone again after one sort pass through its cargo.
 
 ---
 
@@ -252,10 +255,11 @@ Several SHEPHERD PBs within each other's reach elect one leader; the rest stand 
 
 ## B3. Redraw timing and the rest of the panel
 
-1. Once running, SHEPHERD redraws one screen per run, taking turns: status, `-DEBUG`, `-LOG`, then each levels and
-   each stock screen. It skips the redraw on a run that does a transfer or another heavy call, and during a spike hold
-   (up to ~10 s). At its slowest wake rate a run comes every ~1.7 s, so a full turn takes about 1.7 s × the number of
-   screens.
+1. Once running, SHEPHERD redraws one screen at a time, taking turns: status, `-DEBUG`, `-LOG`, then each levels and
+   each stock screen. A turn takes about 1 s of game time (since v1.0.49; one screen per run before), so each screen
+   redraws about once a second, slower under lag. It skips the redraw on a run that does a transfer or another heavy
+   call, and during a spike hold (up to ~10 s). At its slowest wake rate a run comes every ~1.7 s, so a full turn
+   then takes about 1.7 s × the number of screens.
 2. After a start (a compile, a server restart, or the grid loading at its owner's login), the first runs are slow and
    spike holds are common. Until every screen has drawn once, a run with time to spare draws several. Until the first
    cycle completes — under a minute — the panel can go 10 s or more without a redraw.

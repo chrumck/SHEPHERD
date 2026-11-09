@@ -31,7 +31,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.46";
+        const string ScriptVersion = "1.0.50";
 
         // Each item examined and each source finished draws it down, so one Step() is bounded whatever the grid size.
         // Higher shortens the idle full-scan cycle but pushes on both the peak and the average bar.
@@ -71,6 +71,10 @@ namespace IngameScript
 
         const int LogCapacity = 30;
 
+        // Each panel redraws about this often, whatever the wake rate: at Update1 every cheap run drew one, ~50 writes a
+        // second, and a panel write sometimes stalls its run for ms of engine time no script check can foresee.
+        const double PanelSeconds = 1.0;
+
         // Across connectors because a PB manages its docked grids too; a receiver narrows that to the PBs that would
         // manage the same blocks (StandingBy).
         const string LeadChannel = "SHEPHERD";
@@ -87,13 +91,13 @@ namespace IngameScript
         // The user's section; SHEPHERD only adds the keys it lacks, so every setting is listed in Custom Data.
         const string SettingsSection = "Settings";
         // In the README's order, which AddMissing keeps when it appends missing keys. Each rule is {low, high,
-        // default}; priority is any whole number and the three switches are true/false.
+        // default}; priority is any whole number and the four switches are true/false.
         static readonly string[] SettingKeys = ("utcOffsetHours,reactorFillPct,gasGenFillPct,refineryFillPct,bottleSweepMinutes,"
-            + "sortPassSeconds,priority,factionShare,dockedProduction,dockedFuel,peakMs,parkSim,resumeSim,backoffSim,spikeMs,"
+            + "sortPassSeconds,priority,factionShare,dockedProduction,dockedFuel,autoUnloadShip,peakMs,parkSim,resumeSim,backoffSim,spikeMs,"
             + "spikeWindowSeconds,startupSeconds,statusWrapChars").Split(',');
         const int UtcOffset = 0, ReactorFill = 1, GasGenFill = 2, RefineryFill = 3, BottleSweep = 4, SortPass = 5, Priority = 6,
-            FactionShare = 7, DockedProduction = 8, DockedFuel = 9, PeakMs = 10, ParkSim = 11, ResumeSim = 12, BackoffSim = 13,
-            SpikeMs = 14, SpikeWindow = 15, Startup = 16, StatusWrap = 17;
+            FactionShare = 7, DockedProduction = 8, DockedFuel = 9, AutoUnload = 10, PeakMs = 11, ParkSim = 12, ResumeSim = 13,
+            BackoffSim = 14, SpikeMs = 15, SpikeWindow = 16, Startup = 17, StatusWrap = 18;
         static readonly double[] SettingRules =
         {
             -14, 14, 0,
@@ -102,6 +106,7 @@ namespace IngameScript
             0, 100, 30,
             0, 1e6, 3,
             0, 1e6, 60,
+            0, 0, 0,
             0, 0, 0,
             0, 0, 0,
             0, 0, 0,
@@ -168,7 +173,7 @@ namespace IngameScript
         RoutingIndex cycleRouting;       // built at the build phase, consumed when the plan tick enqueues the sort
         List<ManagedBlock> managedBlocks;
         long persistedDisassembler;      // the tracking state as last written, so a flush fires only on the edge
-        readonly double[] settings = new double[18];
+        readonly double[] settings = new double[19];
         readonly PeerElection election = new PeerElection();
         readonly IMyBroadcastListener leadListener;
         string leader;                   // the live peer this PB stands by for; null while it does the work
@@ -269,6 +274,7 @@ namespace IngameScript
         int movesThisCycle;
         int cycleCount;            // completed sort cycles since compile or the last statsReset
         int renderCursor;          // rotates the panels so at most one is built per tick
+        double lastRenderSec = -1e9;
         int lastManaged, lastDest; // cached scan counts so the status readout can render every tick, not just at scan
         IMyTerminalBlock statusLcd;
         IMyTerminalBlock debugLcd;
@@ -359,6 +365,7 @@ namespace IngameScript
                 ShowCommandResult(ReloadConfig());
             }
             else if (argument == "learn") ShowCommandResult(ToggleLearn());
+            else if (argument == "unloadShip") ShowCommandResult(UnloadShips());
             else if (argument == "statsReset")
             {
                 stats.Reset();
@@ -431,15 +438,20 @@ namespace IngameScript
                 && (lastTickKind == RunKind.Other || starting && !panelsDrawn && Room()))
             {
                 Echo(echoText);
-                var first = renderCursor;
-                do
+                // A millisecond of slack, so a wake rate that matches the interval exactly never skips on rounding.
+                if (gameSeconds - lastRenderSec >= PanelSeconds / PanelCount() - 0.001 || starting && !panelsDrawn)
                 {
-                    var at = Runtime.CurrentInstructionCount;
-                    RenderTick();
-                    Measure(at);
+                    lastRenderSec = gameSeconds;
+                    var first = renderCursor;
+                    do
+                    {
+                        var at = Runtime.CurrentInstructionCount;
+                        RenderTick();
+                        Measure(at);
+                    }
+                    while (starting && !panelsDrawn && renderCursor != first && Room());
+                    if (renderCursor == first && destinations != null) panelsDrawn = true;
                 }
-                while (starting && !panelsDrawn && renderCursor != first && Room());
-                if (renderCursor == first && destinations != null) panelsDrawn = true;
             }
 
             ApplyCadence(pacer.NextCadence(backlog));
@@ -461,7 +473,7 @@ namespace IngameScript
                 if (panel != null) job = job == null ? panel : job + "+" + panel;
                 if (beat) job = job == null ? "beat" : job + "+beat";
                 Log((throttled ? "throttling " + CadenceLabel() + " (" : "slow (") + Profiler.Tag(prevKind) + " " + (job ?? "none") + " "
-                    + lastRunMs.ToString("0.000") + "ms " + runInstructions + "i) +" + sinceStart.ToString("0") + "s");
+                    + lastRunMs.ToString("0.000") + "ms " + runInstructions + "i sim " + pacer.SimInstant.ToString("0.00") + ") +" + sinceStart.ToString("0") + "s");
             }
             if (engaged) lastBackoffSec = gameSeconds;
             lastBackoffs = pacer.Backoffs;
@@ -564,6 +576,13 @@ namespace IngameScript
                         lastTickKind = RunKind.Transfer;
                         pacer.NotifyHeavyFired();
                     }
+                    else if (r == StepResult.Refilled && !drySweep)
+                    {
+                        // Filling a bottle is an engine call that can cost ms on a loaded server, so it is paced like a
+                        // transfer and draws no panel in its run.
+                        lastTickKind = RunKind.Fill;
+                        pacer.NotifyHeavyFired();
+                    }
                     else if (r == StepResult.Planned)
                     {
                         // Usually cheap, but a tick where a discovery operation changes state can cost several ms.
@@ -621,7 +640,7 @@ namespace IngameScript
         // discovery in flight, since nothing moves while learning.
         string ToggleLearn()
         {
-            if (leader != null) return "standing by - run learn on " + leader;
+            if (leader != null) return RunOn("learn");
             if (learnSaving) return "already saving after one more sweep";
             if (learnMode)
             {
@@ -633,6 +652,18 @@ namespace IngameScript
             learnMode = true;
             Log("learning - arrange items, run learn again to save");
             return "learning: put items where they belong,\nthen run learn again to save";
+        }
+
+        string RunOn(string command) => "standing by - run " + command + " on " + leader;
+
+        // The fresh lap ResetWork starts walks every marked ship's cargo, and its end releases them.
+        string UnloadShips()
+        {
+            if (leader != null) return RunOn("unloadShip");
+            ResetWork();
+            RefreshScope(scope);
+            var n = scope.MarkShips();
+            return n > 0 ? "unloading " + n + " ship" + (n == 1 ? "" : "s") : "no ship docked";
         }
 
         // Teachers are the home destinations with exactly one category and no catch-all, and every reserve container in
@@ -753,7 +784,7 @@ namespace IngameScript
         {
             connectorBuffer.Empty();
             GridTerminalSystem.GetBlocksOfType(connectorBuffer);
-            into.Build(connectorBuffer, Me.CubeGrid, Me.OwnerId, On(FactionShare), On(DockedProduction), On(DockedFuel));
+            into.Build(connectorBuffer, Me.CubeGrid, Me.OwnerId, On(FactionShare), On(DockedProduction), On(DockedFuel), On(AutoUnload));
         }
 
         // The election runs ahead of the tick's heavy gate, so its scans take the gate themselves: a cold scan inside a
@@ -1126,6 +1157,11 @@ namespace IngameScript
                 noRouteStates.Commit();
                 unreachableStates.Commit();
                 ResetLap();
+                if (!job.Dry)
+                {
+                    foreach (var ship in scope.Unloading) Log("unloaded " + ship.CustomName);
+                    scope.Unloading.Empty();
+                }
             }
             if (job.Dry || bottleTanks == null || bottleTanks.Count == 0) return;
             driver.Enqueue(new BottleJob(sortSources, bottleTanks, ExamineBudget) { Full = full });
@@ -1409,7 +1445,7 @@ namespace IngameScript
                  + ", " + quotaCount + " quotas, " + overrideCount + " overrides, " + factCount + " facts"
                  // Said outright, since a setting that didn't take shows only as behaviour that didn't change.
                  + "\npriority " + settings[Priority] + (On(FactionShare) ? ", factionShare" : "") + (On(DockedProduction) ? ", dockedProduction" : "")
-                 + (On(DockedFuel) ? ", dockedFuel" : "")
+                 + (On(DockedFuel) ? ", dockedFuel" : "") + (On(AutoUnload) ? ", autoUnloadShip" : "")
                  + "\npeakMs " + settings[PeakMs] + ", parkSim " + settings[ParkSim] + ", resumeSim " + settings[ResumeSim]
                  + ", backoffSim " + settings[BackoffSim]
                  + "\nspikeMs " + settings[SpikeMs] + ", spikeWindowSeconds " + settings[SpikeWindow] + ", startupSeconds " + settings[Startup]
@@ -1418,7 +1454,7 @@ namespace IngameScript
                  + ", wrap " + settings[StatusWrap];
         }
 
-        static bool IsSwitch(int setting) => setting > Priority && setting <= DockedFuel;
+        static bool IsSwitch(int setting) => setting > Priority && setting <= AutoUnload;
 
         bool On(int setting) => settings[setting] != 0;
 
@@ -1503,10 +1539,12 @@ namespace IngameScript
 
         static readonly string[] Panels = { "status", "debug", "log", "levels", "stock" };
 
+        int PanelCount() => 3 + (reserveLcds?.Count ?? 0) + (stockLcds?.Count ?? 0);
+
         void RenderTick()
         {
             var levels = 3 + (reserveLcds?.Count ?? 0);
-            var panels = levels + (stockLcds?.Count ?? 0);
+            var panels = PanelCount();
             if (renderCursor >= panels) renderCursor = 0; // the scan dropped an LCD since the last render
             lastPanel = Panels[renderCursor < 3 ? renderCursor : renderCursor < levels ? 3 : 4];
             if (renderCursor == 0) RenderStatusLcd();
@@ -1708,7 +1746,7 @@ namespace IngameScript
                                          + " leads\nTo lead: a higher priority= in\nthe Settings section of Custom Data\n\n"
                         : learnMode ? " learning\nItems stay put. Run learn again\nto save and resume sorting\n\n"
                         : " running\nLive info on tagged LCD panels\n\n")
-                     + "Commands: configReload, learn, statsReset"
+                     + "Commands: configReload, learn,\nstatsReset, unloadShip"
                      + (commandResult != null ? "\n\n" + commandResult : "")).Replace('[', '(').Replace(']', ')');
         }
 
