@@ -17,8 +17,8 @@ namespace IngameScript
         // only the exceptions are baked, from the game's Blueprints.sbc. Entry: <typeCode><itemSubtype>;<digits>[;<name>]
         // for blueprint "Position<digits>_<name>"; <name> defaults to the subtype less a trailing "Item".
         const string BakedBlueprints =
-            "KCanvas;0030|CMedkit;0021|CPowerkit;0022|DDatapad;0040|OOxygenBottle;0010|GHydrogenBottle;0020"
-            + "|PFlareGunItem;0050|AFlareClip;0051;FlareGunMagazine|AFireworksBoxBlue;0060|AFireworksBoxGreen;0061"
+            "KCanvas;0040|CMedkit;0021|CPowerkit;0022|DDatapad;0030|OOxygenBottle;0010|GHydrogenBottle;0020"
+            + "|PFlareGunItem;0000|AFlareClip;0000;FlareGunMagazine|AFireworksBoxBlue;0060|AFireworksBoxGreen;0061"
             + "|AFireworksBoxRed;0062|AFireworksBoxYellow;0063|AFireworksBoxPink;0064|AFireworksBoxRainbow;0065"
             + "|PSemiAutoPistolItem;0010|PFullAutoPistolItem;0020|PElitePistolItem;0030;EliteAutoPistol"
             + "|PAutomaticRifleItem;0040|PRapidFireAutomaticRifleItem;0050|PPreciseAutomaticRifleItem;0060"
@@ -30,7 +30,9 @@ namespace IngameScript
             + "|AAutomaticRifleGun_Mag_20rd;0040|ARapidFireAutomaticRifleGun_Mag_50rd;0050"
             + "|APreciseAutomaticRifleGun_Mag_5rd;0060|AUltimateAutomaticRifleGun_Mag_30rd;0070"
             + "|ANATO_25x184mm;0080;NATO_25x184mmMagazine|AAutocannonClip;0090|AMissile200mm;0100"
-            + "|AMediumCalibreAmmo;0110|ALargeCalibreAmmo;0120|ASmallRailgunAmmo;0130|ALargeRailgunAmmo;0140";
+            + "|AMediumCalibreAmmo;0110|ALargeCalibreAmmo;0120|ASmallRailgunAmmo;0130|ALargeRailgunAmmo;0140"
+            + "|AFlareBox;0071|AAntiPersonnelTurret_Mag;0075;AntiPersonnelTurretMagazine|AMissile200mmHoming;0101"
+            + "|ATorpedo;0200|ATorpedo_Seeking;0210|ATorpedo_Heavy;0220|ATorpedo_Piercing;0230";
 
         // From the same Blueprints.sbc pass (Stone normalized from its per-1000 blueprint); "Ore/" and "Ingot/" are
         // implied. Ice and Organic have no outputs, baked so they stay known: never scored, never sent to yield

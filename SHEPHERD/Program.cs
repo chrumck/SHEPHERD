@@ -31,7 +31,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.50";
+        const string ScriptVersion = "1.0.51";
 
         // Each item examined and each source finished draws it down, so one Step() is bounded whatever the grid size.
         // Higher shortens the idle full-scan cycle but pushes on both the peak and the average bar.

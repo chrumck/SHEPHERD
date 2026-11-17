@@ -12,7 +12,7 @@ namespace SHEPHERD.Tests
             var facts = new ProductionFacts();
             string bp;
             Assert.True(facts.TryBlueprint("Component/Canvas", out bp));
-            Assert.Equal("Position0030_Canvas", bp);
+            Assert.Equal("Position0040_Canvas", bp);
             Assert.True(facts.TryBlueprint("ConsumableItem/Medkit", out bp));
             Assert.Equal("Position0021_Medkit", bp);
             Assert.True(facts.TryBlueprint("PhysicalGunObject/AngleGrinder2Item", out bp));
@@ -20,7 +20,15 @@ namespace SHEPHERD.Tests
             Assert.True(facts.TryBlueprint("AmmoMagazine/NATO_25x184mm", out bp));
             Assert.Equal("Position0080_NATO_25x184mmMagazine", bp);
             Assert.True(facts.TryBlueprint("AmmoMagazine/FlareClip", out bp));
-            Assert.Equal("Position0051_FlareGunMagazine", bp);
+            Assert.Equal("Position0000_FlareGunMagazine", bp);
+            Assert.True(facts.TryBlueprint("PhysicalGunObject/FlareGunItem", out bp));
+            Assert.Equal("Position0000_FlareGun", bp);
+            Assert.True(facts.TryBlueprint("AmmoMagazine/AntiPersonnelTurret_Mag", out bp));
+            Assert.Equal("Position0075_AntiPersonnelTurretMagazine", bp);
+            Assert.True(facts.TryBlueprint("AmmoMagazine/Torpedo_Piercing", out bp));
+            Assert.Equal("Position0230_Torpedo_Piercing", bp);
+            Assert.True(facts.TryBlueprint("AmmoMagazine/Missile200mmHoming", out bp));
+            Assert.Equal("Position0101_Missile200mmHoming", bp);
             Assert.True(facts.TryBlueprint("PhysicalGunObject/ElitePistolItem", out bp));
             Assert.Equal("Position0030_EliteAutoPistol", bp);
             Assert.True(facts.TryBlueprint("OxygenContainerObject/OxygenBottle", out bp));
@@ -28,7 +36,7 @@ namespace SHEPHERD.Tests
             Assert.True(facts.TryBlueprint("GasContainerObject/HydrogenBottle", out bp));
             Assert.Equal("Position0020_HydrogenBottle", bp);
             Assert.True(facts.TryBlueprint("Datapad/Datapad", out bp));
-            Assert.Equal("Position0040_Datapad", bp);
+            Assert.Equal("Position0030_Datapad", bp);
             Assert.True(facts.TryBlueprint("AmmoMagazine/AutomaticRifleGun_Mag_20rd", out bp));
             Assert.Equal("Position0040_AutomaticRifleGun_Mag_20rd", bp);
         }
