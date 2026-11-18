@@ -31,7 +31,7 @@ Either of these marks SHEPHERD:
 
 1. **A programmable block** whose Custom Data has a `[Settings]` section with the key `refineryFillPct`, and whose
    script text contains `SHEPHERD` where the reader has the script text (the packed script's header comment names
-   it). SHEPHERD adds any missing `[Settings]` key on its first save after a start or a `configReload`, so a newly
+   it). SHEPHERD adds any missing `[Settings]` key on its first save after a start or a reload, so a newly
    built PB has it within seconds of its first run.
 2. **A `[SHEPHERD]` status panel** whose line 1 has the shape in A3 (a block with a screen: a light with the tag
    is a status light, which has no text).
@@ -43,8 +43,8 @@ panel (A3), not by the PB.
 
 ## A2. Job switches — the `[Settings]` section
 
-SHEPHERD reads `[Settings]` at startup and on `configReload` only. These keys turn SHEPHERD's jobs off, so another
-program can take those jobs over:
+SHEPHERD reads `[Settings]` at startup and whenever its Custom Data changes (when: B4). These keys turn SHEPHERD's
+jobs off, so another program can take those jobs over:
 
 | Key | Default | Range | Meaning |
 |---|---|---|---|
@@ -137,8 +137,8 @@ A tag ends at the first `]`.
 
 ## A5. Custom Data that other programs may write
 
-SHEPHERD reads these at startup and on `configReload`. A program that writes them runs `configReload` afterwards
-(which needs the player to own the PB).
+SHEPHERD reads these at startup and whenever its Custom Data changes (when: B4). A program that writes them needs no
+command.
 
 ### A5.1 Reserve quotas — `[Reserve]` and `[Reserve:Name]`
 
@@ -188,10 +188,9 @@ Another program must not write them.
 
 Run with the PB's Run action and an argument (the player must own the PB):
 
-1. `configReload` — re-read Custom Data. A save SHEPHERD still had pending is written first.
-2. `learn` — enter learn mode; run it again to save and leave.
-3. `statsReset` — zero the `[SHEPHERD-DEBUG]` figures.
-4. `unloadShip` — unload every ship docked now, once; each is left alone again after one sort pass through its cargo.
+1. `learn` — enter learn mode; run it again to save and leave.
+2. `statsReset` — zero the `[SHEPHERD-DEBUG]` figures.
+3. `unloadShip` — unload every ship docked now, once; each is left alone again after one sort pass through its cargo.
 
 ---
 
@@ -271,3 +270,16 @@ Several SHEPHERD PBs within each other's reach elect one leader; the rest stand 
 5. A message longer than `[Settings] statusWrapChars` (default 40; `0` = never) is broken at the last space that
    fits, or mid-word when none does; each continuation line starts with two spaces, which no message does, so a
    continuation can be told from a new message. The standing-by panel's leader line is broken the same way.
+
+## B4. When a Custom Data change is read
+
+1. SHEPHERD compares its PB's Custom Data with the text it last read or wrote on every run, so any change — a
+   player's, another program's — is seen on the next run. Its own saves don't count as changes.
+2. It reloads on the first run free for heavy work: usually the same run or within a second or two; longer while it
+   is parked by server lag, and up to 30 s after a `GracefulShutDown::` signal — while SHEPHERD does no work
+   anyway.
+3. A reload writes any save SHEPHERD still had pending first, restarts the current cycle, and logs `Custom Data
+   changed - ` followed by what it read.
+4. **`configReload` is obsolete** (v1.0.53): it still reloads at once, and its result in the detail pane starts
+   with `configReload is obsolete - edits load by themselves`. It was in A6 through v1.0.51; a consumer should stop
+   running it, and a later release may remove it (announced under A8).

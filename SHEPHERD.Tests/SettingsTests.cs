@@ -3,7 +3,7 @@ using Xunit;
 
 namespace SHEPHERD.Tests
 {
-    // [Settings] as a player sees it: the keys SHEPHERD adds with their defaults, what configReload reads back, and
+    // [Settings] as a player sees it: the keys SHEPHERD adds with their defaults, what a reload reads back, and
     // what a bad line logs.
     public class SettingsTests
     {
@@ -66,6 +66,50 @@ namespace SHEPHERD.Tests
                 + "\npeakMs 1.2, parkSim 0.6, resumeSim 0.7, backoffSim 0.95"
                 + "\nspikeMs 7, spikeWindowSeconds 12, startupSeconds 30"
                 + "\nfill % 20/40/35, bottles 0 min, pass 90 s, UTC-3, wrap 32", h.Echo.TrimEnd());
+        }
+
+        [Fact]
+        public void AnEditLoadsWithoutACommand()
+        {
+            List<string> log;
+            var h = Base("[Settings]\nrefineryFillPct=30\n", out log);
+            h.TickUntil(() => h.CustomData.Contains("statusWrapChars"));
+            h.CustomData = h.CustomData.Replace("refineryFillPct=30", "refineryFillPct=35");
+            h.TickUntil(() => log.Count > 0 && log[log.Count - 1].Contains("Custom Data changed"));
+            Assert.Contains("fill % 15/50/35", h.Echo);
+        }
+
+        [Fact]
+        public void ItsOwnSavesAndAnUnchangedRewriteAreNotEdits()
+        {
+            List<string> log;
+            var h = Base("", out log);
+            h.TickUntil(() => h.CustomData.Contains("statusWrapChars"));
+            h.CustomData = new string(h.CustomData.ToCharArray());
+            h.Tick(300);
+            Assert.DoesNotContain(log, frame => frame.Contains("Custom Data changed"));
+        }
+
+        [Fact]
+        public void ABrokenEditIsLoggedOnce()
+        {
+            List<string> log;
+            var h = Base("", out log);
+            h.TickUntil(() => h.CustomData.Contains("statusWrapChars"));
+            h.CustomData = "[Settings\nrefineryFillPct=35\n";
+            h.Tick(300);
+            var last = log[log.Count - 1];
+            Assert.Equal(1, last.Split(new[] { "bad Custom Data" }, System.StringSplitOptions.None).Length - 1);
+        }
+
+        [Fact]
+        public void ConfigReloadStillReloadsAndSaysItIsObsolete()
+        {
+            List<string> log;
+            var h = Base("", out log);
+            h.TickUntil(() => h.CustomData.Contains("statusWrapChars"));
+            h.Command("configReload");
+            Assert.Contains("Commands: learn, statsReset,\nunloadShip\n\nconfigReload is obsolete - edits load by themselves\nreloaded", h.Echo);
         }
 
         [Fact]

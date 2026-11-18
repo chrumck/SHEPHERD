@@ -31,7 +31,7 @@ namespace IngameScript
         // so a script update never resets them.
         #endregion
 
-        const string ScriptVersion = "1.0.51";
+        const string ScriptVersion = "1.0.53";
 
         // Each item examined and each source finished draws it down, so one Step() is bounded whatever the grid size.
         // Higher shortens the idle full-scan cycle but pushes on both the peak and the average bar.
@@ -242,16 +242,17 @@ namespace IngameScript
         readonly StateChannel shipPoolStates;  // same cadence, log-only: the same notes about a ship's pools
         readonly HashSet<string> homePools = new HashSet<string>();   // pools with a container on our own construct
         readonly Dictionary<string, string> allFirstPool = new Dictionary<string, string>();
-        readonly StateChannel quotaStates;     // recomputed each configReload (quota semantics)
+        readonly StateChannel quotaStates;     // recomputed each reload (quota semantics)
         // The status panel's message blocks, in render order. Fixed instances filled in place by their owners, so a
         // render neither allocates nor rebuilds them.
         readonly List<List<string>> statusMessages = new List<List<string>>();
-        // Keyed by pool name ("" = the bare pool). Read only at startup and on configReload, never per cycle.
+        // Keyed by pool name ("" = the bare pool). Read only at startup and on a reload, never per cycle.
         readonly Dictionary<string, ReservePool> reservePools = new Dictionary<string, ReservePool>();
-        // Read only at startup and on configReload, never per cycle; memory is the source of truth.
+        // Read only at startup and on a reload, never per cycle; memory is the source of truth.
         readonly CategoryOverrides categoryOverrides = new CategoryOverrides();
         // Signature of the managed sections as last read/written, so a flush that would change nothing is skipped.
         string lastFlushSignature = "";
+        string loadedConfig;       // Custom Data as last read or written: any other text is an edit not yet loaded
         bool flushPending;         // a managed-section change awaiting its own Save tick
         // In memory only: a recompile leaves learn mode and drops what was not saved, but the arrangement is still in
         // the containers to teach again.
@@ -295,7 +296,7 @@ namespace IngameScript
         // The last row while any [SHEPHERD:*] container exists: the summed catch-all fill, the one figure every
         // category without its own container shares.
         readonly CategoryFill catchAllRow = new CategoryFill("catch-all");
-        // The pool set changes only on configReload, so the entries are rebuilt there and a render only refills them.
+        // The pool set changes only on a reload, so the entries are rebuilt there and a render only refills them.
         readonly List<ReservePool> reserveFillPools = new List<ReservePool>();
         readonly List<CategoryFill> reserveFills = new List<CategoryFill>();       // parallel to reserveFillPools
 
@@ -357,13 +358,9 @@ namespace IngameScript
             lastPanel = null;
             lastBeat = false;
             if (argument != null && argument.StartsWith(GracefulShutDownArg)) HandleGracefulShutDown(argument);
-            else if (argument == "configReload")
-            {
-                // A learned fact waiting for its flush would be dropped by the reload's re-seed from disk.
-                if (flushPending) { flushPending = fillSettings = false; FlushConfig(false); }
-                ResetCycle();
-                ShowCommandResult(ReloadConfig());
-            }
+            // Obsolete since edits reload on their own; kept so a timer, button or program still running it isn't
+            // answered "unrecognized command", and says so to have it dropped.
+            else if (argument == "configReload") ShowCommandResult("configReload is obsolete - edits load by themselves\n" + ApplyConfig());
             else if (argument == "learn") ShowCommandResult(ToggleLearn());
             else if (argument == "unloadShip") ShowCommandResult(UnloadShips());
             else if (argument == "statsReset")
@@ -418,6 +415,20 @@ namespace IngameScript
                 simParkLogged = pacer.SimParked;
                 Log("sim " + pacer.SimInstant.ToString("0.00") + "/" + pacer.SimAvg.ToString("0.00")
                     + (simParkLogged ? " - parking" : " - resuming"));
+            }
+            // An edit applies without a command, else SHEPHERD and a program reading the same text (SSM) act on
+            // different configs. The getter returns the stored string, so an unchanged one compares by reference; an
+            // identical rewrite is adopted so later ticks do too. The reload takes a heavy slot, like a save.
+            var cd = Me.CustomData;
+            if (cd == loadedConfig) loadedConfig = cd;
+            else if (pacer.AllowHeavy)
+            {
+                lastJob = "reload";
+                var result = ApplyConfig();
+                Log("Custom Data changed - " + result);
+                ShowCommandResult(result);
+                lastTickKind = RunKind.Save;
+                pacer.NotifyHeavyFired();
             }
             // A warmed-up PB standing by does no work at all, and renders only a panel the leader doesn't draw.
             if (StandingBy() && warmedUp)
@@ -1312,7 +1323,16 @@ namespace IngameScript
             if (Runtime.UpdateFrequency != f) Runtime.UpdateFrequency = f;
         }
 
-        // Only at startup and on configReload, never per cycle; a malformed line is logged and skipped, never thrown.
+        string ApplyConfig()
+        {
+            // A learned fact waiting for its flush would be dropped by the reload's re-seed from disk.
+            if (flushPending) { flushPending = fillSettings = false; FlushConfig(false); }
+            ResetCycle();
+            return ReloadConfig();
+        }
+
+        // Only at startup and when Custom Data changes, never per cycle; a malformed line is logged and skipped, never
+        // thrown.
         string ReloadConfig()
         {
             reservePools.Empty();
@@ -1325,7 +1345,7 @@ namespace IngameScript
             lastFlushSignature = "";
             for (var i = 0; i < settings.Length; i++) settings[i] = SettingRules[3 * i + 2];
             ApplyPacerSettings();
-            var cd = Me.CustomData;
+            var cd = loadedConfig = Me.CustomData;
             // A fresh PB has empty Custom Data, which MyIni rejects — that is not an error, just "no config yet",
             // so say so plainly; the save tick then writes the settings with their defaults.
             if (string.IsNullOrEmpty(cd) || cd.Trim().Length == 0)
@@ -1474,7 +1494,7 @@ namespace IngameScript
             var store = new ConfigStore(doc, CategoriesSection, ProductionSection, RecipesSection, YieldsSection);
             var learned = learnCommit && !dry;
             // The override map changes only on leaving learn mode; rewriting it at any other flush would delete lines
-            // added since the last reload — a hand edit, or another program's — before configReload could read them.
+            // added since the last reload — a hand edit, or another program's — before a reload could read them.
             if (learned) store.MergeSection(CategoriesSection, categoryOverrides.Entries);
             productionEntries.Empty();
             if (persistedDisassembler != 0)
@@ -1494,6 +1514,7 @@ namespace IngameScript
             if (dry) { store.ToText(); return; }
             if (signature == lastFlushSignature && !learned && !filled) return;
             Me.CustomData = store.ToText();
+            loadedConfig = Me.CustomData;
             lastFlushSignature = signature;
         }
 
@@ -1524,7 +1545,7 @@ namespace IngameScript
             return pool;
         }
 
-        // Only configReload changes the pool set, so a status render just refills fractions and never allocates.
+        // Only a reload changes the pool set, so a status render just refills fractions and never allocates.
         void RebuildReserveFillEntries()
         {
             reserveFillPools.Empty();
@@ -1746,7 +1767,7 @@ namespace IngameScript
                                          + " leads\nTo lead: a higher priority= in\nthe Settings section of Custom Data\n\n"
                         : learnMode ? " learning\nItems stay put. Run learn again\nto save and resume sorting\n\n"
                         : " running\nLive info on tagged LCD panels\n\n")
-                     + "Commands: configReload, learn,\nstatsReset, unloadShip"
+                     + "Commands: learn, statsReset,\nunloadShip"
                      + (commandResult != null ? "\n\n" + commandResult : "")).Replace('[', '(').Replace(']', ')');
         }
 

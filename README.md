@@ -97,7 +97,7 @@ Component/Explosives=Explosives
 2. A new name like `Explosives` routes to `[SHEPHERD:Explosives]` and gets its own row on the status panel.
 3. A recategorized fuel still feeds its machines first: with `Ore/Ice=Ice`, generators fill before
    `[SHEPHERD:Ice]`.
-4. Run `configReload` after editing. Delete a line to revert the item to its built-in category.
+4. An edit applies by itself within seconds. Delete a line to revert the item to its built-in category.
 
 ---
 
@@ -187,9 +187,9 @@ makes a status light instead (item 6), as many as you like.
 ## Settings
 
 All settings live under `[Settings]` in the programmable block's Custom Data, so script updates never
-reset them. SHEPHERD adds any missing key with its default at startup and on `configReload` (a block
+reset them. SHEPHERD adds any missing key with its default at startup and after each reload (a block
 standing by leaves its Custom Data alone). It never changes a line you wrote; delete a line to get its default
-back. Keys are case-sensitive. Run `configReload` after editing.
+back. Keys are case-sensitive. An edit applies by itself within seconds of closing the Custom Data editor.
 
 | Key | Default | Range | What it does |
 |---|---|---|---|
@@ -235,12 +235,13 @@ same care.
 A `spikeGraceSeconds` line left by v1.0.3–v1.0.4 or a `spikeHoldSeconds` line left by v1.0.2–v1.0.10 now logs
 `unknown setting`; delete it. A `spikeMs=5` line left by those versions is safe but slows the first minute; `8` is
 the default now. **Upgrading from v1.0.5 or earlier, also delete `peakMs=0.8` and `backoffSim=0.9`:** they keep the
-old back-off, which does nothing at full sim speed, where Destiny's limiter now punishes too. `configReload` then
+old back-off, which does nothing at full sim speed, where Destiny's limiter now punishes too. SHEPHERD then
 writes the new defaults.
 
 **Mistakes are reported, never guessed.** An unknown key logs `unknown setting '<key>'`; a bad or
-out-of-range value logs `bad setting '<key>=<value>'` and keeps the default. `configReload` shows what was
-read in the programmable block's detail pane (a toggle missing from the `priority` line is off):
+out-of-range value logs `bad setting '<key>=<value>'` and keeps the default. Each reload shows what was
+read in the programmable block's detail pane and logs it after `Custom Data changed - ` (a toggle missing
+from the `priority` line is off):
 
 ```
 reloaded 2 pools, 14 quotas, 3 overrides, 0 facts
@@ -353,7 +354,7 @@ A trailing `A` lets SHEPHERD make the difference. Crafting needs an assembler ta
     NATO_5p56x45mm  40
    ```
 3. Key = type line + `/` + item name: `AmmoMagazine/NATO_5p56x45mm`.
-4. Write the lines into `[Reserve:Missiles]` and `configReload`. Items you left out now move out of the pool.
+4. Write the lines into `[Reserve:Missiles]`. Items you left out now move out of the pool.
 
 Or let **Learn mode** write the lines from what the containers hold.
 
@@ -444,7 +445,7 @@ a given name, queue it, and watch what comes out. Blueprint names often differ f
    [Yields]
    Ore/Modium=Ingot/Modium:0.25,Ingot/Iron:0.1
    ```
-   Delete a line and `configReload` to have it relearned.
+   Delete a line to have it relearned.
 3. **Ingredients stay invisible:** SHEPHERD can't tell what a modded component consumes — give its ingots
    `A` quotas too.
 
@@ -457,7 +458,7 @@ told apart. The line reads `learn X: batch some on <Main>` until SHEPHERD sees a
 `learn X: watching <blueprint> on <Main>` — check that the blueprint named is your batch. If it was something else
 left on the Main, SHEPHERD notes what that one makes and goes back to asking. If it stays there, check the Main has
 the ingredients, or enter the recipe yourself under `[Recipes]` (the blueprint's name is in the mod's
-`Blueprints.sbc`) and `configReload`.
+`Blueprints.sbc`).
 
 **Ore yields:** measured only while an ingot shortfall is blocked, no known ore serves it, and at least 110
 of the unknown ore is available. SHEPHERD isolates one refinery, feeds it only that ore, and records the
@@ -518,10 +519,12 @@ Run the programmable block with one of these arguments (case-sensitive):
 
 | Argument | Does |
 |---|---|
-| `configReload` | Re-reads Custom Data (settings, quotas, categories, learned facts) and shows what it read. Needed after every edit. |
 | `learn` | Enters learn mode; run again to save and resume. |
 | `statsReset` | Restarts the `[SHEPHERD-DEBUG]` measurement window. |
 | `unloadShip` | Unloads every ship docked now, once (**Docked ships**). |
+
+`configReload` is obsolete since v1.0.53: an edit to Custom Data loads by itself within seconds. It still reloads
+and says it is obsolete; remove it from timers and buttons, as a later release may drop it.
 
 `[SHEPHERD-DEBUG]` rows: `ftch` block sweep · `scan` block classify · `bld` sort-plan build · `xfer` item
 transfer · `fill` a gas tank filling bottles · `plan` production plan · `save` writing Custom Data · `cmd` these
@@ -575,7 +578,7 @@ SHEPHERD on the same grid** — load SHEPHERD into the old programmable block or
 ## Notes
 
 1. **Routing keeps no saved state** — it is re-derived from block names and item types every cycle. Custom
-   Data is read only at startup and on `configReload`; SHEPHERD writes only its managed `[Categories]`,
+   Data is read at startup and whenever it changes; SHEPHERD writes only its managed `[Categories]`,
    `[Production]`, `[Recipes]` and `[Yields]` sections, missing `[Settings]` keys and learned `[Reserve…]` lines,
    keeping your other lines and comments.
 2. **Weapons, parachute hatches and welders are left alone** — they pull their own ammo, canvas and

@@ -53,7 +53,7 @@ namespace IngameScript
             return (semi >= 0 ? value.Cut(0, semi) : value).Trim();
         }
 
-        // The model is authoritative: a hand edit to a managed value takes effect by configReload re-seeding the
+        // The model is authoritative: a hand edit to a managed value takes effect by the reload re-seeding the
         // model, not by surviving a flush.
         public void MergeSection(string section, IEnumerable<KeyValuePair<string, string>> entries)
         {

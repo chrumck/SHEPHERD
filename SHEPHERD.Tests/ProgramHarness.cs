@@ -99,7 +99,8 @@ namespace SHEPHERD.Tests
             typeof(Program).GetConstructor(Type.EmptyTypes).Invoke(Program, null);
         }
 
-        public string CustomData => me.Object.CustomData;
+        // Setting it is a player's edit or another program's write.
+        public string CustomData { get => me.Object.CustomData; set => me.Object.CustomData = value; }
 
         public UpdateFrequency Frequency => runtime.Object.UpdateFrequency;
 
